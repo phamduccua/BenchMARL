@@ -108,14 +108,14 @@ class _BRActorContinuous(nn.Module):
         """Returns (action, log_prob, entropy). mask is unused for continuous."""
         dist = self._dist(obs)
         action = dist.rsample()
-        action = action.clamp(self.low, self.high)
+        action = action.clamp(min=self.low, max=self.high)
         log_prob = dist.log_prob(action).sum(-1)
         entropy = dist.entropy().sum(-1)
         return action, log_prob, entropy
 
     def greedy_action(self, obs: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:  # noqa: ARG002
         dist = self._dist(obs)
-        return dist.mean.clamp(self.low, self.high)
+        return dist.mean.clamp(min=self.low, max=self.high)
 
 
 def _extract_agent_obs(td: TensorDictBase, group: str, agent_idx: int, obs_key: str) -> torch.Tensor:
@@ -235,8 +235,20 @@ class NashConvCallback(Callback):
                 action_low, action_high = None, None
             else:
                 action_dim = action_spec.shape[-1]
-                action_low = torch.tensor(action_spec.space.low, dtype=torch.float32)
-                action_high = torch.tensor(action_spec.space.high, dtype=torch.float32)
+                # action_spec.space.low may be shaped (n_agents, action_dim);
+                # flatten to 1D and take the last action_dim values so that
+                # _BRActorContinuous gets a (action_dim,) bound — all agents
+                # in the group share the same bounds.
+                action_low = (
+                    torch.as_tensor(action_spec.space.low, dtype=torch.float32)
+                    .reshape(-1)[-action_dim:]
+                    .contiguous()
+                )
+                action_high = (
+                    torch.as_tensor(action_spec.space.high, dtype=torch.float32)
+                    .reshape(-1)[-action_dim:]
+                    .contiguous()
+                )
 
             group_gaps: List[float] = []
             for agent_idx in range(n_agents):
