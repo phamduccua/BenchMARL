@@ -64,12 +64,12 @@ EXPERIMENT_OVERRIDES = [
 
 # NashConv — tính mỗi 50 evaluation step
 NASHCONV_OVERRIDES = [
-    "nashconv.enable=true",
-    "nashconv.eval_interval=50",   # tính NashConv 1 lần / 50 eval step
-    "nashconv.br_updates=5",
-    "nashconv.br_episodes=4",
-    "nashconv.eval_episodes=5",
-    "nashconv.br_lr=3e-4",
+    "+nashconv.enable=true",
+    "+nashconv.eval_interval=50",
+    "+nashconv.br_updates=5",
+    "+nashconv.br_episodes=4",
+    "+nashconv.eval_episodes=5",
+    "+nashconv.br_lr=3e-4",
 ]
 
 # VI tau cho ippo_vi / ippo_vi_no_norm / ippo_vi_no_anchor
