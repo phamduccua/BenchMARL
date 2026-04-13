@@ -34,6 +34,10 @@ ALGORITHMS = [
     "ippo_extragradient",
     "ippo_vi_no_norm",
     "ippo_vi_no_anchor",
+    "maddpg",
+    "iddpg",
+    "masac",
+    "isac",
 ]
 
 TASKS = [
@@ -42,7 +46,7 @@ TASKS = [
     # "vmas/simple_tag",
 ]
 
-SEEDS = [0, 1, 2]
+SEEDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 # Overrides Hydra áp dụng cho MỌI lần chạy
 EXPERIMENT_OVERRIDES = [
@@ -52,21 +56,25 @@ EXPERIMENT_OVERRIDES = [
     "experiment.evaluation_interval=120_000",
     "experiment.on_policy_collected_frames_per_batch=6000",
     "experiment.on_policy_n_envs_per_worker=10",
-    "experiment.on_policy_minibatch_size=400",
+    "experiment.on_policy_minibatch_size=32",   # batch size = 32
     "experiment.on_policy_n_minibatch_iters=45",
     "experiment.lr=0.00005",
     "experiment.checkpoint_interval=0",
 ]
 
-# NashConv — đặt nashconv.enable=true để bật
-# (tự động bật cho mọi algorithm, không chỉ VI)
+# NashConv — tính mỗi 50 evaluation step
 NASHCONV_OVERRIDES = [
-    # "nashconv.enable=true",
-    # "nashconv.br_updates=5",
-    # "nashconv.br_episodes=4",
-    # "nashconv.eval_episodes=5",
-    # "nashconv.br_lr=3e-4",
-    # "nashconv.eval_interval=1",
+    "nashconv.enable=true",
+    "nashconv.eval_interval=50",   # tính NashConv 1 lần / 50 eval step
+    "nashconv.br_updates=5",
+    "nashconv.br_episodes=4",
+    "nashconv.eval_episodes=5",
+    "nashconv.br_lr=3e-4",
+]
+
+# VI tau cho ippo_vi / ippo_vi_no_norm / ippo_vi_no_anchor
+VI_OVERRIDES = [
+    "algorithm.vi_tau=0.05",       # tau = 0.05
 ]
 
 # True trên máy headless (Kaggle GPU, Colab)
@@ -88,12 +96,16 @@ def _xvfb_available() -> bool:
     ).returncode == 0
 
 
+_VI_ALGOS = {"ippo_vi", "ippo_vi_no_norm", "ippo_vi_no_anchor"}
+
+
 def _build_cmd(algorithm: str, task: str, seed: int) -> list[str]:
+    extra = VI_OVERRIDES if algorithm in _VI_ALGOS else []
     base = [sys.executable, "benchmarl/run.py",
             f"algorithm={algorithm}",
             f"task={task}",
             f"seed={seed}",
-            ] + EXPERIMENT_OVERRIDES + NASHCONV_OVERRIDES
+            ] + EXPERIMENT_OVERRIDES + NASHCONV_OVERRIDES + extra
 
     if HEADLESS and _xvfb_available():
         base = ["xvfb-run", "-a"] + base
@@ -142,6 +154,9 @@ def run_multirun():
            f"task={task_str}",
            f"seed={seed_str}",
            ] + EXPERIMENT_OVERRIDES + NASHCONV_OVERRIDES
+           # Lưu ý: VI_OVERRIDES (vi_tau) chỉ có hiệu lực khi algorithm là VI.
+           # Hydra sẽ bỏ qua field không tồn tại nếu dùng +algorithm.vi_tau=0.05
+
     )
 
     print("=" * 60)
