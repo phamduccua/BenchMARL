@@ -31,7 +31,8 @@ from torchrl.envs.utils import ExplorationType, set_exploration_type, step_mdp
 from torchrl.record.loggers import generate_exp_name
 from tqdm import tqdm
 
-from benchmarl.algorithms import IppoConfig, MappoConfig
+from benchmarl.algorithms.ippo import IppoConfig
+from benchmarl.algorithms.mappo import MappoConfig
 
 from benchmarl.algorithms.common import AlgorithmConfig
 from benchmarl.environments import Task, TaskClass
