@@ -32,7 +32,7 @@ if _has_hydra:
         cs.store(name="experiment_config", group="experiment", node=ExperimentConfig)
         # Load algos schemas
         for algo_name, algo_schema in algorithm_config_registry.items():
-            cs.store(name=algo_name, group="algorithm", node=algo_schema)
+            cs.store(name=f"{algo_name}_config", group="algorithm", node=algo_schema)
         # Load task schemas
         for task_schema_name, task_schema in _task_class_registry.items():
             cs.store(name=f"{task_schema_name}_config", group="task", node=task_schema)
