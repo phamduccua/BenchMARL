@@ -1,3 +1,7 @@
+defaults:
+  - ippo_vi_no_norm_config
+  - _self_
+
 share_param_critic: False
 clip_epsilon: 0.2
 entropy_coef: 0.0
