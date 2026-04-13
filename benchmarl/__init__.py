@@ -29,7 +29,7 @@ if _has_hydra:
         # Create instance to load hydra schemas
         cs = ConfigStore.instance()
         # Load experiment schema
-        cs.store(name="base_experiment", group="experiment", node=ExperimentConfig)
+        cs.store(name="experiment_config", group="experiment", node=ExperimentConfig)
         # Load algos schemas
         for algo_name, algo_schema in algorithm_config_registry.items():
             cs.store(name=algo_name, group="algorithm", node=algo_schema)
