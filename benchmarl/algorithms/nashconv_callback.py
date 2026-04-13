@@ -28,7 +28,7 @@ Usage::
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -46,7 +46,7 @@ from benchmarl.experiment.callback import Callback
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _BRActor(nn.Module):
-    """Lightweight MLP actor used only for best-response approximation."""
+    """Lightweight MLP actor for discrete action spaces (Categorical)."""
 
     def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 64):
         super().__init__()
@@ -72,6 +72,52 @@ class _BRActor(nn.Module):
         return self.logits(obs, mask).argmax(-1)
 
 
+class _BRActorContinuous(nn.Module):
+    """Lightweight MLP actor for continuous action spaces (Gaussian)."""
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dim: int = 64,
+        low: Optional[torch.Tensor] = None,
+        high: Optional[torch.Tensor] = None,
+    ):
+        super().__init__()
+        self.action_dim = action_dim
+        self.register_buffer("low", low if low is not None else torch.full((action_dim,), -1.0))
+        self.register_buffer("high", high if high is not None else torch.full((action_dim,), 1.0))
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        )
+        self.mean_head = nn.Linear(hidden_dim, action_dim)
+        self.log_std = nn.Parameter(torch.zeros(action_dim))
+
+    def _dist(self, obs: torch.Tensor):
+        feat = self.net(obs)
+        mean = torch.tanh(self.mean_head(feat))
+        # Scale mean to [low, high]
+        scale = (self.high - self.low) / 2.0
+        center = (self.high + self.low) / 2.0
+        mean = mean * scale + center
+        std = self.log_std.exp().clamp(1e-4, 2.0)
+        return torch.distributions.Normal(mean, std)
+
+    def act(self, obs: torch.Tensor, mask: Optional[torch.Tensor] = None):  # noqa: ARG002
+        """Returns (action, log_prob, entropy). mask is unused for continuous."""
+        dist = self._dist(obs)
+        action = dist.rsample()
+        action = action.clamp(self.low, self.high)
+        log_prob = dist.log_prob(action).sum(-1)
+        entropy = dist.entropy().sum(-1)
+        return action, log_prob, entropy
+
+    def greedy_action(self, obs: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:  # noqa: ARG002
+        dist = self._dist(obs)
+        return dist.mean.clamp(self.low, self.high)
+
+
 def _extract_agent_obs(td: TensorDictBase, group: str, agent_idx: int, obs_key: str) -> torch.Tensor:
     """Return obs tensor for a single agent: shape (*batch, obs_dim)."""
     obs = td.get((group, obs_key))          # (*batch, n_agents, obs_dim)
@@ -88,7 +134,7 @@ def _extract_agent_mask(
 
 
 def _extract_agent_reward(
-    td: TensorDictBase, group: str, agent_idx: int, n_agents: int
+    td: TensorDictBase, group: str, agent_idx: int, n_agents: int = 0  # noqa: ARG001
 ) -> float:
     """Scalar per-agent reward for one step."""
     reward = td.get(("next", group, "reward"), None)
@@ -183,16 +229,23 @@ class NashConvCallback(Callback):
             # Observation / action dimensions for this group
             obs_dim = exp.observation_spec[group][self.obs_key].shape[-1]
             action_spec = exp.action_spec[group, "action"]
-            # NashConv is defined for finite action spaces
-            if not hasattr(action_spec.space, "n"):
-                continue  # skip continuous action groups
-            action_dim = action_spec.space.n
+            is_discrete = hasattr(action_spec.space, "n")
+            if is_discrete:
+                action_dim = action_spec.space.n
+                action_low, action_high = None, None
+            else:
+                action_dim = action_spec.shape[-1]
+                action_low = torch.tensor(action_spec.space.low, dtype=torch.float32)
+                action_high = torch.tensor(action_spec.space.high, dtype=torch.float32)
 
             group_gaps: List[float] = []
             for agent_idx in range(n_agents):
                 # 2. Train a best-response actor for agent `agent_idx`
                 br_actor = self._train_br_actor(
-                    group, agent_idx, obs_dim, action_dim, device
+                    group, agent_idx, obs_dim, action_dim, device,
+                    is_discrete=is_discrete,
+                    action_low=action_low,
+                    action_high=action_high,
                 )
 
                 # 3. Evaluate BR utility
@@ -242,7 +295,7 @@ class NashConvCallback(Callback):
         return result
 
     def _make_br_policy(
-        self, group: str, agent_idx: int, br_actor: _BRActor, deterministic: bool
+        self, group: str, agent_idx: int, br_actor: Union[_BRActor, _BRActorContinuous], deterministic: bool
     ):
         """Return a callable that wraps exp.policy, replacing agent_idx's action."""
         base_policy = self.experiment.policy
@@ -261,7 +314,10 @@ class NashConvCallback(Callback):
                 action_i, _, _ = br_actor.act(obs_i, mask_i)
 
             actions = td.get((group, "action")).clone()
-            actions[..., agent_idx] = action_i
+            if isinstance(br_actor, _BRActorContinuous):
+                actions[..., agent_idx, :] = action_i
+            else:
+                actions[..., agent_idx] = action_i
             td.set((group, "action"), actions)
             return td
 
@@ -286,7 +342,12 @@ class NashConvCallback(Callback):
             action_i, log_prob_i, entropy_i = policy_fn(obs_i, mask_i)
 
             actions = td.get((group, "action")).clone()
-            actions[..., agent_idx] = action_i.detach()
+            if action_i.dim() > 0 and action_i.shape[-1] > 1:
+                # continuous: action_i shape (..., action_dim)
+                actions[..., agent_idx, :] = action_i.detach()
+            else:
+                # discrete: action_i is scalar per env
+                actions[..., agent_idx] = action_i.detach()
             td.set((group, "action"), actions)
 
             td = env.step(td)
@@ -304,10 +365,20 @@ class NashConvCallback(Callback):
         obs_dim: int,
         action_dim: int,
         device: str,
-    ) -> _BRActor:
+        is_discrete: bool = True,
+        action_low: Optional[torch.Tensor] = None,
+        action_high: Optional[torch.Tensor] = None,
+    ) -> Union[_BRActor, _BRActorContinuous]:
         """Train a best-response actor for agent `agent_idx` via REINFORCE."""
         exp = self.experiment
-        br_actor = _BRActor(obs_dim, action_dim, self.br_hidden_dim).to(device)
+        if is_discrete:
+            br_actor = _BRActor(obs_dim, action_dim, self.br_hidden_dim).to(device)
+        else:
+            low = action_low.to(device) if action_low is not None else None
+            high = action_high.to(device) if action_high is not None else None
+            br_actor = _BRActorContinuous(
+                obs_dim, action_dim, self.br_hidden_dim, low=low, high=high
+            ).to(device)
         optimizer = optim.Adam(br_actor.parameters(), lr=self.br_lr)
 
         for _ in range(self.br_updates):
@@ -332,7 +403,10 @@ class NashConvCallback(Callback):
                     action_i, log_prob_i, entropy_i = br_actor.act(obs_i, mask_i)
 
                     actions = td.get((group, "action")).clone()
-                    actions[..., agent_idx] = action_i.detach()
+                    if is_discrete:
+                        actions[..., agent_idx] = action_i.detach()
+                    else:
+                        actions[..., agent_idx, :] = action_i.detach()
                     td.set((group, "action"), actions)
 
                     td = env.step(td)
@@ -380,7 +454,7 @@ class NashConvCallback(Callback):
         self,
         group: str,
         agent_idx: int,
-        br_actor: _BRActor,
+        br_actor: Union[_BRActor, _BRActorContinuous],
         device: str,
     ) -> float:
         """Evaluate expected return for agent `agent_idx` when using the BR actor."""
@@ -406,7 +480,10 @@ class NashConvCallback(Callback):
                         action_i, _, _ = br_actor.act(obs_i, mask_i)
 
                     actions = td.get((group, "action")).clone()
-                    actions[..., agent_idx] = action_i
+                    if isinstance(br_actor, _BRActorContinuous):
+                        actions[..., agent_idx, :] = action_i
+                    else:
+                        actions[..., agent_idx] = action_i
                     td.set((group, "action"), actions)
 
                 td = env.step(td)
