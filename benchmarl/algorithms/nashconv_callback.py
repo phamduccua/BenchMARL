@@ -393,72 +393,76 @@ class NashConvCallback(Callback):
             ).to(device)
         optimizer = optim.Adam(br_actor.parameters(), lr=self.br_lr)
 
-        for _ in range(self.br_updates):
-            all_log_probs: List[torch.Tensor] = []
-            all_entropies: List[torch.Tensor] = []
-            all_returns: List[float] = []
+        # _evaluation_loop is decorated @torch.no_grad() in experiment.py,
+        # so on_evaluation_end inherits a no-grad context.  We must
+        # explicitly re-enable autograd for the REINFORCE update.
+        with torch.enable_grad():
+            for _ in range(self.br_updates):
+                all_log_probs: List[torch.Tensor] = []
+                all_entropies: List[torch.Tensor] = []
+                all_returns: List[float] = []
 
-            for _ in range(self.br_episodes):
-                env = exp.env_func()
-                td = env.reset().to(device)
-                done = False
-                ep_log_probs: List[torch.Tensor] = []
-                ep_entropies: List[torch.Tensor] = []
-                ep_rewards: List[float] = []
+                for _ in range(self.br_episodes):
+                    env = exp.env_func()
+                    td = env.reset().to(device)
+                    done = False
+                    ep_log_probs: List[torch.Tensor] = []
+                    ep_entropies: List[torch.Tensor] = []
+                    ep_rewards: List[float] = []
 
-                while not done:
-                    with torch.no_grad():
-                        td = exp.policy(td)
+                    while not done:
+                        with torch.no_grad():
+                            td = exp.policy(td)
 
-                    obs_i = _extract_agent_obs(td, group, agent_idx, self.obs_key)
-                    mask_i = _extract_agent_mask(td, group, agent_idx)
-                    action_i, log_prob_i, entropy_i = br_actor.act(obs_i, mask_i)
+                        obs_i = _extract_agent_obs(td, group, agent_idx, self.obs_key)
+                        mask_i = _extract_agent_mask(td, group, agent_idx)
+                        action_i, log_prob_i, entropy_i = br_actor.act(obs_i, mask_i)
 
-                    actions = td.get((group, "action")).clone()
-                    if is_discrete:
-                        actions[..., agent_idx] = action_i.detach()
-                    else:
-                        actions[..., agent_idx, :] = action_i.detach()
-                    td.set((group, "action"), actions)
+                        actions = td.get((group, "action")).clone()
+                        if is_discrete:
+                            actions[..., agent_idx] = action_i.detach()
+                        else:
+                            actions[..., agent_idx, :] = action_i.detach()
+                        td.set((group, "action"), actions)
 
-                    td = env.step(td)
-                    ep_rewards.append(
-                        _extract_agent_reward(td, group, agent_idx, len(exp.group_map[group]))
-                    )
-                    ep_log_probs.append(log_prob_i)
-                    ep_entropies.append(entropy_i)
-                    done = _is_done(td, group)
-                    if not done:
-                        td = step_mdp(td)
+                        td = env.step(td)
+                        ep_rewards.append(
+                            _extract_agent_reward(td, group, agent_idx, len(exp.group_map[group]))
+                        )
+                        ep_log_probs.append(log_prob_i)
+                        ep_entropies.append(entropy_i)
+                        done = _is_done(td, group)
+                        if not done:
+                            td = step_mdp(td)
 
-                env.close()
+                    env.close()
 
-                # Discounted returns (Monte-Carlo)
-                G = 0.0
-                ep_returns: List[float] = []
-                for r in reversed(ep_rewards):
-                    G = r + self.gamma * G
-                    ep_returns.append(G)
-                ep_returns.reverse()
+                    # Discounted returns (Monte-Carlo)
+                    G = 0.0
+                    ep_returns: List[float] = []
+                    for r in reversed(ep_rewards):
+                        G = r + self.gamma * G
+                        ep_returns.append(G)
+                    ep_returns.reverse()
 
-                all_log_probs.extend(ep_log_probs)
-                all_entropies.extend(ep_entropies)
-                all_returns.extend(ep_returns)
+                    all_log_probs.extend(ep_log_probs)
+                    all_entropies.extend(ep_entropies)
+                    all_returns.extend(ep_returns)
 
-            if not all_log_probs:
-                continue
+                if not all_log_probs:
+                    continue
 
-            returns = torch.tensor(all_returns, dtype=torch.float32, device=device)
-            if returns.numel() > 1:
-                returns = (returns - returns.mean()) / (returns.std(unbiased=False) + 1e-6)
+                returns = torch.tensor(all_returns, dtype=torch.float32, device=device)
+                if returns.numel() > 1:
+                    returns = (returns - returns.mean()) / (returns.std(unbiased=False) + 1e-6)
 
-            log_probs = torch.stack(all_log_probs)
-            entropies = torch.stack(all_entropies)
-            loss = -(log_probs * returns).mean() - self.entropy_coef * entropies.mean()
+                log_probs = torch.stack(all_log_probs)
+                entropies = torch.stack(all_entropies)
+                loss = -(log_probs * returns).mean() - self.entropy_coef * entropies.mean()
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
         return br_actor
 
