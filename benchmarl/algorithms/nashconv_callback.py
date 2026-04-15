@@ -425,7 +425,7 @@ class NashConvCallback(Callback):
                             actions[..., agent_idx, :] = action_i.detach()
                         td.set((group, "action"), actions)
 
-                        td = env.step(td)
+                        td = env.step(td).to(device)
                         ep_rewards.append(
                             _extract_agent_reward(td, group, agent_idx, len(exp.group_map[group]))
                         )
