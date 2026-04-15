@@ -231,6 +231,13 @@ class IppoExtragradient(IppoVI):
     difference is handled entirely by :class:`ExtraGradientCallback`.
     """
 
+    def __init__(self, extra_betas: tuple = (0.9, 0.999), **kwargs):
+        # extra_betas is a config-only field consumed by ExtraGradientCallback.
+        # We absorb it here so it doesn't reach Algorithm.__init__() which
+        # would raise TypeError for an unexpected keyword argument.
+        self.extra_betas = extra_betas
+        super().__init__(**kwargs)
+
 
 @dataclass
 class IppoExtragradientConfig(IppoVIConfig):

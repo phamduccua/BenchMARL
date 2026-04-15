@@ -62,10 +62,10 @@ EXPERIMENT_OVERRIDES = [
     "experiment.checkpoint_interval=0",
 ]
 
-# NashConv — tính mỗi 50 evaluation step
+# NashConv — tính mỗi evaluation step
 NASHCONV_OVERRIDES = [
     "+nashconv.enable=true",
-    "+nashconv.eval_interval=50",
+    "+nashconv.eval_interval=1",
     "+nashconv.br_updates=5",
     "+nashconv.br_episodes=4",
     "+nashconv.eval_episodes=5",
