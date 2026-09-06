@@ -52,7 +52,16 @@ _ABLATION = _HERE / "run_ablation.py"
 # Measured on this project's machine (12-core CPU) at the real per-round config,
 # 2 rounds x 6000 frames x 45 epochs. Hours per 1M frames, by gradients/update.
 # Used only by --dry-run, and only to give an order of magnitude.
-_HOURS_PER_MFRAME = {1: 1.91, 2: 3.09}
+#
+# The task matters: a matrix game has no physics to simulate and comes out ~40%
+# cheaper, so quoting the simple_tag numbers for it would overstate the cost by
+# more than half.
+_HOURS_PER_MFRAME = {
+    "vmas/simple_tag": {1: 1.91, 2: 3.09},
+    "matrixgame/rock_paper_scissors": {1: 1.08, 2: 1.92},
+    "matrixgame/matching_pennies": {1: 1.08, 2: 1.92},
+}
+_UNMEASURED_TASK = "vmas/simple_tag"  # what an unmeasured task is quoted at
 
 
 def _cell_dir(args, optimizer: str, seed: int) -> pathlib.Path:
@@ -170,9 +179,10 @@ def _estimate_hours(args, optimizer: str) -> float:
     epochs = args.epochs
     if args.half_epochs and grads == 2:
         epochs = max(1, epochs // 2)
+    rates = _HOURS_PER_MFRAME.get(args.task, _HOURS_PER_MFRAME[_UNMEASURED_TASK])
     # The measurement was taken at 45 epochs. Cost is close to linear in the
     # number of gradient steps, which is epochs * ceil(batch / minibatch).
-    return _HOURS_PER_MFRAME[grads] * frames / 1e6 * (epochs / 45.0)
+    return rates[grads] * frames / 1e6 * (epochs / 45.0)
 
 
 def main():
@@ -228,7 +238,10 @@ def main():
         print(f"{done_already} already finished, resuming the remaining {len(todo)}")
 
     serial = sum(_estimate_hours(args, optimizer) for optimizer, _ in todo)
-    print("\nEstimated cost (extrapolated from a 2-round measurement, not a guarantee):")
+    measured = args.task in _HOURS_PER_MFRAME
+    print("\nEstimated cost (extrapolated from a 2-round measurement, not a guarantee"
+          + ("):" if measured else f"; {args.task} was never measured, quoting "
+                                   f"{_UNMEASURED_TASK} rates):"))
     for optimizer in args.optimizers:
         each = _estimate_hours(args, optimizer)
         remaining = sum(1 for name, _ in todo if name == optimizer)
