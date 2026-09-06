@@ -36,22 +36,25 @@ import warnings
 import torch
 
 from benchmarl.algorithms import IppoConfig
-from benchmarl.environments import VmasTask
+from benchmarl.environments import task_config_registry
 from benchmarl.experiment import Experiment, ExperimentConfig
 from benchmarl.models.mlp import MlpConfig
 from benchmarl.optimizers import (
+    AdaptiveConfig,
     AdaptiveExtragradientConfig,
     ExtragradientConfig,
     PcConfig,
     PcviConfig,
 )
 
-# The 2x2 grid: {fixed, adaptive} lambda x {Step 5 contraction, beta_k = 1}
+# The 2x2 grid: {fixed, adaptive} lambda x {Step 5 contraction, beta_k = 1},
+# plus `adaptive`, which has a lambda_0 of its own and the same failure mode.
 OPTIMIZERS = {
     "extragradient": ExtragradientConfig,
     "adaptive_extragradient": AdaptiveExtragradientConfig,
     "pc": PcConfig,
     "pcvi": PcviConfig,
+    "adaptive": AdaptiveConfig,
 }
 
 
@@ -87,7 +90,7 @@ def build_experiment(optimizer_name, lambda_0, seed, args):
     optimizer_config.lambda_0 = lambda_0
 
     return Experiment(
-        task=VmasTask.BALANCE.get_from_yaml(),
+        task=task_config_registry[args.task].get_from_yaml(),
         algorithm_config=IppoConfig.get_from_yaml(),
         model_config=MlpConfig.get_from_yaml(),
         critic_model_config=MlpConfig.get_from_yaml(),
@@ -99,15 +102,23 @@ def build_experiment(optimizer_name, lambda_0, seed, args):
 
 def run_one(optimizer_name, lambda_0, seed, args):
     experiment = build_experiment(optimizer_name, lambda_0, seed, args)
-    optimizer = experiment.optimizers[args.group]["loss_objective"]
+    group = args.group or next(iter(experiment.group_map))
+    optimizer = experiment.optimizers[group]["loss_objective"]
 
     betas, corrs = [], []
     original_apply = optimizer.apply
 
     def spy_apply(*a, **kw):
         info = original_apply(*a, **kw)
-        betas.append(info["pcvi_beta_k"])
-        corrs.append(info["pcvi_grad_corr"])
+        # `adaptive` keeps Adam and has no beta_k at all, and every optimizer
+        # prefixes its diagnostics with its own name, so neither key can be
+        # assumed to be there.
+        if "pcvi_beta_k" in info:
+            betas.append(info["pcvi_beta_k"])
+        for key in ("pcvi_grad_corr", "adaptive_grad_corr"):
+            if key in info:
+                corrs.append(info[key])
+                break
         return info
 
     optimizer.apply = spy_apply
@@ -121,13 +132,18 @@ def run_one(optimizer_name, lambda_0, seed, args):
         diverged = True
         print(f"    [diverged: {type(error).__name__}]")
 
-    betas = torch.tensor(betas) if betas else torch.zeros(1)
+    has_beta = bool(betas)
+    betas = torch.tensor(betas) if has_beta else torch.zeros(1)
     return {
         "diverged": float(diverged),
         "lambda_end": optimizer.lambda_k,
         "n_steps": optimizer.n_steps,
-        "beta_median": betas.median().item(),
-        "beta_negative_pct": 100.0 * (betas < 0).float().mean().item(),
+        # nan, not 0, for a branch that has no beta_k: 0 would read as
+        # "the contraction collapsed", which is a different finding.
+        "beta_median": betas.median().item() if has_beta else float("nan"),
+        "beta_negative_pct": (
+            100.0 * (betas < 0).float().mean().item() if has_beta else float("nan")
+        ),
         "grad_corr": torch.tensor(corrs).mean().item() if corrs else float("nan"),
         "mean_return": experiment.mean_return,
     }
@@ -135,6 +151,13 @@ def run_one(optimizer_name, lambda_0, seed, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--task", default="vmas/balance",
+                        choices=sorted(task_config_registry),
+                        help="RUN THIS ON THE TASK YOU WILL ACTUALLY USE: lambda "
+                             "settles at ~p/L_local, which is a property of the "
+                             "task and the trajectory, not of the algorithm. A "
+                             "lambda_0 picked on balance does not transfer to "
+                             "simple_tag.")
     parser.add_argument("--lambda0", type=float, nargs="+",
                         default=[1.0, 0.1, 0.01, 1e-3, 1e-4])
     parser.add_argument("--optimizer", type=str, nargs="+", default=["pcvi"],
@@ -151,14 +174,17 @@ def main():
                         help="all runs land in this folder, one subfolder each")
     parser.add_argument("--loggers", nargs="*", default=["csv"],
                         help="[] to log nothing, csv and/or wandb otherwise")
-    parser.add_argument("--group", type=str, default="agents")
+    parser.add_argument("--group", type=str, default=None,
+                        help="agent group to watch; default is the task's first "
+                             "(balance has only `agents`, simple_tag has "
+                             "`adversary` and `agent`)")
     args = parser.parse_args()
     warnings.filterwarnings("ignore")
 
     minibatches = -(-args.frames_per_batch // args.minibatch_size)
     steps = args.iters * args.epochs * minibatches
     print(
-        f"IPPO + vmas/balance + MLP | {args.iters} rounds x {args.epochs} epochs x "
+        f"IPPO + {args.task} + MLP | {args.iters} rounds x {args.epochs} epochs x "
         f"{minibatches} minibatches = {steps} update steps per branch "
         f"({args.iters * args.frames_per_batch} collected frames), "
         f"seeds {args.seeds}"
@@ -191,7 +217,7 @@ def main():
         "Read: `end/0` = 1.000 means lambda never moved, i.e. lambda_0 was already\n"
         "below p / L_local and the adaptive step is inert."
     )
-    if set(args.optimizer) == set(OPTIMIZERS):
+    if {"pc", "pcvi"} <= set(args.optimizer):
         print(
             "\nWith both variants: wherever `end/0` is 1.000 for pcvi, pc and pcvi are\n"
             "the SAME algorithm and must agree. The gap between them at the large\n"
