@@ -71,6 +71,11 @@ def _run(args, device: str, n_envs: int, optimizer: str, scratch: pathlib.Path):
         "--loggers",  # empty: writing csv is not what we are timing
     ]
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    if device != "cpu":
+        # The compute is on the GPU; letting torch also spin up one thread per
+        # core (128 of them on the rented box) only adds contention. This is what
+        # the project's earlier BenchMARL_2 runs did too.
+        env.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
     started = time.time()
     completed = subprocess.run(
         command, cwd=str(_HERE.parent.parent), env=env,
