@@ -23,8 +23,8 @@ parallel::
 
     frames_per_batch / n_envs = sequential environment steps per collection round
 
-    6000 / 10   = 600 sequential steps   <- what the run book uses
-    6000 / 600  =  10 sequential steps   <- same data, 60x less serialisation
+    120000 / 200  = 600 sequential steps  <- the current default
+    120000 / 1200 = 100 sequential steps  <- same data, 6x less serialisation
 
 Usage::
 
@@ -97,9 +97,9 @@ def main():
     parser.add_argument("--iters", type=int, default=2,
                         help="collection rounds per probe; 2 is enough and the "
                              "first one carries the start-up cost")
-    parser.add_argument("--frames-per-batch", type=int, default=6000)
-    parser.add_argument("--minibatch-size", type=int, default=400)
-    parser.add_argument("--epochs", type=int, default=45)
+    parser.add_argument("--frames-per-batch", type=int, default=120000)
+    parser.add_argument("--minibatch-size", type=int, default=4096)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--scratch", default="outputs/_throughput")
     args = parser.parse_args()
 
@@ -119,8 +119,16 @@ def main():
         pass
     print(f"CPU cores: {os.cpu_count()}")
     frames = args.iters * args.frames_per_batch
+    minibatches = -(-args.frames_per_batch // args.minibatch_size)
+    updates = minibatches * args.epochs
     print(f"{args.algorithm.upper()} on {args.task} | {args.iters} rounds x "
-          f"{args.frames_per_batch} frames x {args.epochs} epochs per probe\n")
+          f"{args.frames_per_batch} frames | minibatch {args.minibatch_size} "
+          f"x {args.epochs} epochs")
+    print(f"= {updates} buoc gradient moi vong.")
+    if updates != 450:
+        print(f"!! Mac dinh cua run_ablation la 120000/4096/15 = 450 buoc moi vong.")
+        print(f"!! Ban dang do MOT CAU HINH KHAC voi cai se chay that.")
+    print()
 
     print(f"{'device':>7} {'n_envs':>7} {'steps/round':>12} "
           + "".join(f"{o:>14}" for o in args.optimizers))
@@ -154,8 +162,12 @@ def main():
     for optimizer, (hours, device, n_envs) in best.items():
         print(f"  Nhanh nhat cho {optimizer}: --device {device} --n-envs {n_envs} "
               f"=> {hours:.2f} h/1M frame")
-    print("\nDoi chieu: may Windows cua du an do duoc 1.91 h (adam) va 3.09 h (pcvi)")
-    print("tren cpu voi --n-envs 10.\n")
+    print("\nDoi chieu, may Windows 12 loi cua du an o DUNG cau hinh nay:")
+    print("  cpu  n_envs=200                : adam 0.24 h, pcvi 0.42 h")
+    print("  cuda n_envs=200 (Quadro P1000) : adam 0.35 h, pcvi 0.42 h\n")
+    print("Chon --workers cho run_campaign.py: moi o la mot tien trinh rieng. Tren")
+    print("CPU nhieu loi, thu --workers = so_loi / threads-per-worker. Tren GPU cac")
+    print("o dung chung mot GPU nen phai do rieng, dung suy tu so loi CPU.\n")
     print("LUU Y: --n-envs thay doi thanh phan cua moi batch thu thap, nen no KHONG")
     print("phai mot num tang toc mien phi. Chon MOT gia tri, dung cho MOI nhanh cua")
     print("ablation, va ghi ro trong luan van.")
