@@ -1,0 +1,30 @@
+defaults:
+  - pc_plus_config
+  - _self_
+
+# `pc` plus the two departures that mean anything with a frozen lambda.
+# Compare against `pc` to measure what they were worth.
+
+lambda_0: 0.001
+beta: 1.95
+gamma: 1.0
+beta_k_min: null
+beta_k_max: null
+eps_denominator: 1.0e-12
+use_identity_dk: false
+reset_lambda_per_batch: false
+
+# beta_k < 0 means <u_k - v_k, d_k> < 0: the inverse strong monotonicity the
+# contraction rests on fails there, and the faithful step moves against d_k.
+# 1.0 falls back to a plain extragradient step, which needs no such assumption.
+beta_fallback: 1.0
+# Formula (3.1) computes "a - a + b" explicitly: 3.1e-5 of error in float32
+# against 3.6e-15 in float64.
+float64_stats: true
+# Steps 4-6 read in the metric of Adam's diagonal. AMSGrad keeps v_hat monotone
+# so P converges.
+precond: true
+precond_beta2: 0.999
+precond_eps: 1.0e-8
+precond_amsgrad: true
+precond_clamp: 1000.0

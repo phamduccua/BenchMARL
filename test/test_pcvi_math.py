@@ -499,8 +499,13 @@ def test_pc_config_yaml_and_signature():
     assert set(config.__dict__) < signature
     assert "p" not in config.__dict__
     assert "lambda_min" not in config.__dict__
-    # but _optimizer_kwargs must supply every argument of Algorithm 1 proper
-    assert set(config._optimizer_kwargs(None)) == signature - DEPARTURES
+    # but _optimizer_kwargs must supply every argument of Algorithm 1 proper,
+    # plus the two departures that mean anything with a frozen lambda
+    lambda_only = {"lambda_growth", "min_probe_rel"}
+    assert set(config._optimizer_kwargs(None)) == signature - lambda_only
+    assert not (set(config.__dict__) & lambda_only), (
+        "lambda never moves in pc: a growth factor or a probe guard would be a lie"
+    )
 
 
 def test_pc_config_defaults():

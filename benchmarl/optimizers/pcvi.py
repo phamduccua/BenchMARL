@@ -669,6 +669,16 @@ class PcConfig(OptimizerConfig):
     eps_denominator: float = MISSING
     use_identity_dk: bool = MISSING
     reset_lambda_per_batch: bool = MISSING
+    # Departures from the paper. Only these two mean anything here: lambda is
+    # frozen, so lambda_growth and min_probe_rel -- both of which act on Step 3 --
+    # have nothing to act on. Neutral defaults keep pc.yaml faithful.
+    beta_fallback: Optional[float] = None
+    float64_stats: bool = False
+    precond: bool = False
+    precond_beta2: float = 0.999
+    precond_eps: float = 1e-8
+    precond_amsgrad: bool = True
+    precond_clamp: float = 1e3
 
     @staticmethod
     def associated_class() -> Type[torch.optim.Optimizer]:
@@ -778,3 +788,24 @@ class PcviPlusConfig(PcviConfig):
     precond_eps: float = MISSING
     precond_amsgrad: bool = MISSING
     precond_clamp: float = MISSING
+
+
+@dataclass
+class PcPlusConfig(PcConfig):
+    """``pc`` with the departures that mean anything for a frozen ``lambda``.
+
+    Only two of the four apply. ``lambda_growth`` and ``min_probe_rel`` both act
+    on Step 3, which this variant switches off, so there is nothing for them to
+    do. What is left is real:
+
+    * ``beta_fallback`` -- ``pc`` runs Step 5, so ``beta_k`` can go negative, and
+      measured on ``matrixgame/rock_paper_scissors`` it did: player_1 sat at
+      ``beta_k = -0.22`` while player_0 was at +1.95.
+    * ``precond`` -- ``pc`` drops Adam's per-coordinate scaling, which is exactly
+      the handicap the ``sgd`` control exists to isolate.
+
+    Paired with :class:`PcviPlusConfig`, this keeps the 2x2 grid intact under the
+    improvements: ``{lambda fixed, lambda adaptive} x {Step 5, beta_k = 1}``
+    still differ by one mechanism each, not by which departures are switched on.
+    """
+

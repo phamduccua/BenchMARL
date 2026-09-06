@@ -50,3 +50,13 @@ reset_lambda_per_batch: False
 # Adam parameters. null = read from the experiment config.
 eps: null
 extra_kwargs: null
+
+# --- Departures from the paper. Neutral here.
+# Largest factor lambda may rise by in one step. 1.0 = the paper's monotone
+# lambda, which cannot recover from a single noisy ||F(u)-F(v)||.
+lambda_growth: 1.0
+# Hold lambda when ||u_k - v_k|| < min_probe_rel * ||theta||, i.e. when the
+# displacement is below the working precision and the Lipschitz estimate built
+# from it is rounding noise. 0.0 = off.
+min_probe_rel: 0.0
+float64_stats: false

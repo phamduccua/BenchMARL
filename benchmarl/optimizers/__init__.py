@@ -6,7 +6,7 @@
 
 from .adam import AdamConfig
 from .adam_cosine import AdamCosine, AdamCosineConfig
-from .adaptive import Adaptive, AdaptiveConfig
+from .adaptive import Adaptive, AdaptiveConfig, AdaptivePlusConfig
 from .lookahead import Lookahead, LookaheadConfig
 from .common import OptimizerConfig
 from .sgd import SgdConfig
@@ -14,6 +14,7 @@ from .pcvi import (
     AdaptiveExtragradientConfig,
     ExtragradientConfig,
     PcConfig,
+    PcPlusConfig,
     Pcvi,
     PcviConfig,
     PcviPlusConfig,
@@ -25,11 +26,13 @@ classes = [
     "AdamCosineConfig",
     "Adaptive",
     "AdaptiveConfig",
+    "AdaptivePlusConfig",
     "AdaptiveExtragradientConfig",
     "ExtragradientConfig",
     "Lookahead",
     "LookaheadConfig",
     "PcConfig",
+    "PcPlusConfig",
     "Pcvi",
     "PcviConfig",
     "PcviPlusConfig",
@@ -42,10 +45,12 @@ optimizer_config_registry = {
     "adam": AdamConfig,
     "adam_cosine": AdamCosineConfig,
     "adaptive": AdaptiveConfig,
+    "adaptive_plus": AdaptivePlusConfig,
     "extragradient": ExtragradientConfig,
     "adaptive_extragradient": AdaptiveExtragradientConfig,
     "lookahead": LookaheadConfig,
     "pc": PcConfig,
+    "pc_plus": PcPlusConfig,
     "pcvi": PcviConfig,
     "pcvi_plus": PcviPlusConfig,
     "sgd": SgdConfig,

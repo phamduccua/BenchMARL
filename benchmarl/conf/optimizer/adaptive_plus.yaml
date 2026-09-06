@@ -1,0 +1,26 @@
+defaults:
+  - adaptive_plus_config
+  - _self_
+
+# `adaptive` plus the two Step 3 departures. Compare against `adaptive`.
+
+lambda_0: 0.01
+p: 0.5
+eps_denominator: 1.0e-12
+lr_scale: 1.0
+lipschitz_from: probe
+reset_lambda_per_batch: false
+eps: null
+extra_kwargs: null
+
+# Largest factor lambda may rise by in one step. 1.0 = the paper's monotone
+# lambda, which cannot recover from a single noisy ||F(u)-F(v)||. lambda never
+# exceeds lambda_0 whatever this is.
+lambda_growth: 1.1
+# Hold lambda when ||u_k - v_k|| < min_probe_rel * ||theta||: below the working
+# precision, F(u_k) - F(v_k) is rounding noise and the ratio is meaningless.
+min_probe_rel: 1.0e-5
+float64_stats: true
+# A floor, as a last resort. If lambda sits exactly here, the two guards above
+# failed and this is what is holding the run up.
+lambda_min: 1.0e-8

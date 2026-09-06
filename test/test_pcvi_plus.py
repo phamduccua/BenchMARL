@@ -220,3 +220,83 @@ def test_all_four_off_reproduces_pcvi_exactly():
     )
     for x, y in zip(a.param_groups[0]["params"], b.param_groups[0]["params"]):
         assert torch.equal(x.detach(), y.detach())
+
+
+# ------------------------------------- the same treatment for pc and adaptive
+
+
+def test_pc_plus_gets_only_the_departures_that_mean_anything():
+    """lambda is frozen in pc, so the two Step 3 guards have nothing to act on."""
+    from benchmarl.optimizers import PcPlusConfig
+
+    config = PcPlusConfig.get_from_yaml()
+    assert config.beta_fallback == 1.0, "pc runs Step 5, so beta_k can go negative"
+    assert config.precond is True, "pc drops Adam's scaling; this puts it back"
+    assert config.float64_stats is True
+    assert not hasattr(config, "lambda_growth"), (
+        "lambda never moves in pc: exposing a growth factor would be a lie"
+    )
+    assert not hasattr(config, "min_probe_rel")
+
+
+def test_adaptive_plus_gets_only_the_departures_that_mean_anything():
+    """adaptive has no Step 5 and already is Adam, so only Step 3 is left."""
+    from benchmarl.optimizers import AdaptivePlusConfig
+
+    config = AdaptivePlusConfig.get_from_yaml()
+    assert config.lambda_growth > 1.0
+    assert config.min_probe_rel > 0.0
+    assert config.float64_stats is True
+    assert not hasattr(config, "beta_fallback"), "there is no beta_k here"
+    assert not hasattr(config, "precond"), "adaptive keeps Adam already"
+
+
+def test_the_faithful_branches_stay_faithful():
+    from benchmarl.optimizers import AdaptiveConfig, PcConfig
+
+    pc = PcConfig.get_from_yaml()
+    assert pc.beta_fallback is None and pc.precond is False
+    assert pc.float64_stats is False
+    adaptive = AdaptiveConfig.get_from_yaml()
+    assert adaptive.lambda_growth == 1.0 and adaptive.min_probe_rel == 0.0
+    assert adaptive.float64_stats is False
+
+
+def test_adaptive_lambda_recovers_with_growth():
+    """The same collapse, in the branch that uses Step 3 and nothing else."""
+    from benchmarl.optimizers.adaptive import Adaptive
+
+    def run(**kwargs):
+        torch.manual_seed(0)
+        w = torch.nn.Parameter(torch.randn(64) * 0.1)
+        optimizer = Adaptive([w], lambda_0=0.5, p=0.5, **kwargs)
+        lambdas = []
+        for k in range(12):
+            g = torch.randn_like(w) * 50.0 if k == 3 else w.detach() * 0.05
+            w.grad = g
+            optimizer.probe()
+            g = torch.randn_like(w) * 50.0 if k == 3 else w.detach() * 0.05
+            w.grad = g
+            lambdas.append(optimizer.apply()["adaptive_lambda_next"])
+        return lambdas
+
+    faithful = run()
+    grown = run(lambda_growth=1.5)
+    assert all(a >= b for a, b in zip(faithful, faithful[1:])), "must be monotone"
+    assert grown[-1] > faithful[-1], "growth has to let it climb back"
+    assert max(grown) <= 0.5 + 1e-12, "but never above lambda_0"
+
+
+def test_adaptive_probe_guard_holds_lambda():
+    from benchmarl.optimizers.adaptive import Adaptive
+
+    torch.manual_seed(0)
+    w = torch.nn.Parameter(torch.randn(64) * 0.1)
+    optimizer = Adaptive([w], lambda_0=1e-3, p=0.5, min_probe_rel=1e-5)
+    for _ in range(20):
+        w.grad = torch.full_like(w, 1e-9)
+        optimizer.probe()
+        w.grad = torch.full_like(w, 1e-9)
+        info = optimizer.apply()
+    assert optimizer.n_probe_too_small > 0
+    assert info["adaptive_lambda_next"] == pytest.approx(1e-3, rel=1e-9)

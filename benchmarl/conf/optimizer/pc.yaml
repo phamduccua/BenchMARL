@@ -40,3 +40,16 @@ use_identity_dk: False
 # Meaningless here (lambda never changes); kept so the three variants have the
 # same shape of config.
 reset_lambda_per_batch: False
+
+# --- Departures from the paper. Neutral here; `pcvi_plus` is where they are on.
+# lambda is frozen in this variant, so the two Step 3 guards do not apply.
+# null = faithful: when <u_k - v_k, d_k> < 0 the step moves against d_k.
+beta_fallback: null
+# Scalar reductions in float64. Formula (3.1) computes "a - a + b" explicitly.
+float64_stats: false
+# Run Steps 4-6 in the metric of Adam's diagonal instead of the Euclidean one.
+precond: false
+precond_beta2: 0.999
+precond_eps: 1.0e-8
+precond_amsgrad: true
+precond_clamp: 1000.0

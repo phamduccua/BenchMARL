@@ -41,7 +41,12 @@ from typing import Any, Dict, List, Optional, Type
 
 import torch
 
-from benchmarl.optimizers._lambda import adaptive_lambda, global_dot, global_norm
+from benchmarl.optimizers._lambda import (
+    adaptive_lambda,
+    global_dot,
+    global_norm,
+    to_float64,
+)
 from benchmarl.optimizers.common import OptimizerConfig
 
 LIPSCHITZ_FROM = ("probe", "iterates")
@@ -114,6 +119,9 @@ class Adaptive(torch.optim.Optimizer):
         reset_lambda_per_batch: bool = False,
         eps: float = 1e-8,
         extra_kwargs: Optional[Dict[str, Any]] = None,
+        lambda_growth: float = 1.0,
+        min_probe_rel: float = 0.0,
+        float64_stats: bool = False,
     ):
         if not lambda_0 > 0:
             raise ValueError(f"lambda_0 has to be > 0, got {lambda_0}")
@@ -123,6 +131,13 @@ class Adaptive(torch.optim.Optimizer):
             raise ValueError(f"lr_scale has to be > 0, got {lr_scale}")
         if lambda_min < 0:
             raise ValueError(f"lambda_min has to be >= 0, got {lambda_min}")
+        if lambda_growth < 1.0:
+            raise ValueError(
+                f"lambda_growth has to be >= 1.0, got {lambda_growth}. 1.0 is the "
+                f"paper's non-increasing lambda; above it, lambda may recover."
+            )
+        if min_probe_rel < 0:
+            raise ValueError(f"min_probe_rel has to be >= 0, got {min_probe_rel}")
         if lambda_min > lambda_0:
             raise ValueError(
                 f"lambda_min ({lambda_min}) has to be <= lambda_0 ({lambda_0})"
@@ -141,6 +156,9 @@ class Adaptive(torch.optim.Optimizer):
                 "eps_denominator": eps_denominator,
                 "lr_scale": lr_scale,
                 "lambda_min": lambda_min,
+                "lambda_growth": lambda_growth,
+                "min_probe_rel": min_probe_rel,
+                "float64_stats": float64_stats,
                 "lipschitz_from": lipschitz_from,
                 "reset_lambda_per_batch": reset_lambda_per_batch,
             },
@@ -156,6 +174,11 @@ class Adaptive(torch.optim.Optimizer):
         self.eps_denominator = eps_denominator
         self.lr_scale = lr_scale
         self.lambda_min = lambda_min
+        self.lambda_growth = lambda_growth
+        self.min_probe_rel = min_probe_rel
+        self.float64_stats = float64_stats
+        # how often the probe was too small to carry information
+        self.n_probe_too_small = 0
         self.lipschitz_from = lipschitz_from
         self.reset_lambda_per_batch = reset_lambda_per_batch
 
@@ -255,6 +278,48 @@ class Adaptive(torch.optim.Optimizer):
             prm.data.copy_(u_i)
 
     @torch.no_grad()
+    def _next_lambda(self, lam, delta, delta_grad):
+        """Step 3, with the two guards that a real run showed it needs.
+
+        ``delta`` and ``delta_grad`` are the vectors ``u_k - v_k`` and
+        ``F(u_k) - F(v_k)``; the norms are taken here so both call sites -- the
+        probe path and the "iterates" path -- get the same treatment.
+
+        Measured on matrixgame/rock_paper_scissors: the faithful rule drove
+        ``lambda`` from 1e-2 to 1.5e-10 and the branch stopped moving, because
+        once the displacement is below the working precision ``delta_grad`` is
+        rounding noise and the ratio keeps coming out small.
+        """
+        if self.float64_stats:
+            delta, delta_grad = to_float64(delta), to_float64(delta_grad)
+        norm_delta = global_norm(delta)
+        norm_delta_grad = global_norm(delta_grad)
+
+        if self.min_probe_rel > 0.0:
+            norm_theta = global_norm(
+                [prm.detach() for prm in self._params]
+            )
+            if norm_delta.item() < self.min_probe_rel * max(
+                norm_theta.item(), 1e-30
+            ):
+                self.n_probe_too_small += 1
+                return lam, norm_delta, norm_delta_grad
+
+        return (
+            adaptive_lambda(
+                lambda_k=lam,
+                norm_delta=norm_delta,
+                norm_delta_grad=norm_delta_grad,
+                p=self.p,
+                eps_denominator=self.eps_denominator,
+                lambda_min=self.lambda_min,
+                growth=self.lambda_growth,
+                lambda_max=self.lambda_0,
+            ),
+            norm_delta,
+            norm_delta_grad,
+        )
+
     def apply(self) -> Dict[str, float]:
         """Phase 2: read ``F(v_k)``, update ``lambda``, then take the Adam step."""
         if self._u is None:
@@ -266,15 +331,11 @@ class Adaptive(torch.optim.Optimizer):
         self._u = self._f_u = None
 
         norm_f_u = global_norm(f_u)
-        norm_diff = global_norm(torch._foreach_sub(f_u, f_v))
-        lambda_next = adaptive_lambda(
-            lambda_k=lam,
-            # ||u_k - v_k|| = lambda_k ||F(u_k)||
-            norm_delta=lam * norm_f_u,
-            norm_delta_grad=norm_diff,
-            p=self.p,
-            eps_denominator=self.eps_denominator,
-            lambda_min=self.lambda_min,
+        # u_k - v_k = lambda_k F(u_k)
+        lambda_next, _, _ = self._next_lambda(
+            lam,
+            torch._foreach_mul(f_u, lam),
+            torch._foreach_sub(f_u, f_v),
         )
 
         lr = self._adam_step(f_u, lam)
@@ -342,15 +403,7 @@ class Adaptive(torch.optim.Optimizer):
         else:
             delta = torch._foreach_sub(theta_k, self._prev_params)
             delta_grad = torch._foreach_sub(f_u, self._prev_grads)
-            norm_diff = global_norm(delta_grad)
-            lambda_next = adaptive_lambda(
-                lambda_k=lam,
-                norm_delta=global_norm(delta),
-                norm_delta_grad=norm_diff,
-                p=self.p,
-                eps_denominator=self.eps_denominator,
-                lambda_min=self.lambda_min,
-            )
+            lambda_next, _, norm_diff = self._next_lambda(lam, delta, delta_grad)
 
         # saved before the step: they are the pair (theta_k, F(theta_k))
         self._prev_params, self._prev_grads = theta_k, f_u
@@ -411,6 +464,12 @@ class AdaptiveConfig(OptimizerConfig):
     reset_lambda_per_batch: bool = MISSING
     eps: Optional[float] = MISSING
     extra_kwargs: Optional[Dict[str, Any]] = MISSING
+    # Departures from the paper. Only these apply here: Adaptive uses Step 3 and
+    # nothing else, so there is no beta_k to fall back on, and it keeps Adam, so
+    # it already has the preconditioner pc/pcvi drop. Neutral by default.
+    lambda_growth: float = 1.0
+    min_probe_rel: float = 0.0
+    float64_stats: bool = False
 
     @staticmethod
     def associated_class() -> Type[torch.optim.Optimizer]:
@@ -437,3 +496,19 @@ class AdaptiveConfig(OptimizerConfig):
                 f"{self.lr_scale * self.lambda_0:g} and decaying from there."
             )
         return kwargs
+
+
+@dataclass
+class AdaptivePlusConfig(AdaptiveConfig):
+    """``adaptive`` with the two departures that apply to Step 3.
+
+    ``beta_fallback`` and ``precond`` are absent by construction: this variant
+    has no Step 5 to produce a ``beta_k``, and it keeps Adam, so the metric is
+    already Adam's.
+
+    What remains is the mechanism that killed a real run: ``lambda`` is
+    non-increasing in the paper, so one ``||F(u_k)-F(v_k)||`` dominated by
+    rounding lowers it permanently. ``lambda_growth`` lets it recover, bounded by
+    ``lambda_0``; ``min_probe_rel`` stops the estimate being taken at all when
+    the displacement is below the working precision.
+    """
