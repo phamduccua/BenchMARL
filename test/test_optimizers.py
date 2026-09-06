@@ -20,6 +20,7 @@ from benchmarl.experiment import Experiment
 from benchmarl.models.mlp import MlpConfig
 from benchmarl.optimizers import (
     AdamConfig,
+    AdamCosineConfig,
     AdaptiveExtragradientConfig,
     ExtragradientConfig,
     optimizer_config_registry,
@@ -379,3 +380,80 @@ def test_the_four_grid_cells_are_distinct_configs():
         assert kwargs["use_adaptive_lambda"] is adaptive, name
         assert kwargs["use_contraction"] is contraction, name
         assert optimizer_config_registry[name].associated_class() is Pcvi, name
+
+
+# ------------------------------------------------- the adam+cosine control
+
+
+def test_adam_cosine_starts_at_the_peak_and_ends_at_eta_min(config):
+    """The control branch has to be the SAME Adam at the same tuned lr, with only
+    the schedule added -- otherwise it controls for two things at once."""
+    experiment = _experiment(config, AdamCosineConfig.get_from_yaml())
+    optimizer = experiment.optimizers["agents"]["loss_objective"]
+    assert isinstance(optimizer, torch.optim.Adam)
+    assert optimizer.param_groups[0]["lr"] == config.lr
+    assert optimizer.param_groups[0]["eps"] == config.adam_eps
+
+    total = optimizer.total_steps
+    assert total == config.max_n_iters * experiment._updates_per_collection_round()
+
+    seen = []
+    for parameter in optimizer.param_groups[0]["params"]:
+        parameter.grad = torch.zeros_like(parameter)
+    for _ in range(total + 1):
+        optimizer.step()
+        seen.append(optimizer.param_groups[0]["lr"])
+
+    assert seen[0] == pytest.approx(config.lr, rel=1e-12), "must start at the peak"
+    assert seen[total // 2] == pytest.approx(config.lr / 2, rel=1e-3), "midpoint"
+    assert seen[-1] == 0.0, "must land on eta_min"
+    assert all(a >= b for a, b in zip(seen, seen[1:])), "must never increase"
+
+
+def test_adam_cosine_decays_over_a_real_run(config):
+    experiment = _experiment(config, AdamCosineConfig.get_from_yaml())
+    peak = experiment.optimizers["agents"]["loss_objective"].param_groups[0]["lr"]
+    experiment.run()
+    ended_at = experiment.optimizers["agents"]["loss_objective"].param_groups[0]["lr"]
+    assert ended_at < peak, "the schedule never moved"
+
+
+def test_adam_cosine_is_one_gradient_per_update(config):
+    """It is a control for the SCHEDULE, not for the two-gradient cost."""
+    cfg = AdamCosineConfig.get_from_yaml()
+    assert not cfg.requires_two_gradient_evals()
+    assert not cfg.uses_gradient_as_operator()
+    experiment = _experiment(config, cfg)
+    assert not experiment.two_point_optimizers
+
+
+def test_adam_cosine_needs_a_known_run_length(config):
+    """Experiment itself rejects an unbounded run first, so this guard is only
+    reachable by building the optimizer directly -- but a silent total_steps=0
+    would produce a division by zero deep in the schedule, so it is kept."""
+    cfg = AdamCosineConfig.get_from_yaml()
+    config.max_n_iters = config.max_n_frames = None
+    with pytest.raises(ValueError, match="total_steps"):
+        cfg._total_steps(config)
+
+
+def test_adam_cosine_honours_an_explicit_total_steps(config):
+    cfg = AdamCosineConfig.get_from_yaml()
+    cfg.total_steps = 17
+    experiment = _experiment(config, cfg)
+    assert experiment.optimizers["agents"]["loss_objective"].total_steps == 17
+
+
+def test_adam_cosine_step_count_survives_a_checkpoint(config):
+    experiment = _experiment(config, AdamCosineConfig.get_from_yaml())
+    optimizer = experiment.optimizers["agents"]["loss_objective"]
+    for parameter in optimizer.param_groups[0]["params"]:
+        parameter.grad = torch.zeros_like(parameter)
+    for _ in range(3):
+        optimizer.step()
+
+    restored = _experiment(config, AdamCosineConfig.get_from_yaml())
+    restored_optimizer = restored.optimizers["agents"]["loss_objective"]
+    restored_optimizer.load_state_dict(optimizer.state_dict())
+    assert restored_optimizer._step_count_cosine == optimizer._step_count_cosine
+    assert restored_optimizer.param_groups[0]["initial_lr"] == config.lr

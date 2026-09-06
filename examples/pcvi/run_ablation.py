@@ -270,9 +270,9 @@ def main():
         "  * lambda_end == lambda_0 means the adaptive mechanism never fired.\n"
         "  * grad/step 2 branches cost twice as much per update; rerun with\n"
         "    --half-epochs for an equal-compute comparison.\n"
-        "  * add an SGD branch and an Adam+decay branch before attributing any\n"
-        "    difference to the algorithm rather than to the preconditioner or to\n"
-        "    the learning-rate schedule."
+        "  * include `--optimizers sgd adam_cosine` before attributing any\n"
+        "    difference to the algorithm rather than to the preconditioner\n"
+        "    (sgd) or to the learning-rate schedule (adam_cosine)."
     )
     if len(args.seeds) < 5:
         print(f"  * {len(args.seeds)} seed(s) is not enough to compare returns.")

@@ -5,6 +5,7 @@
 #
 
 from .adam import AdamConfig
+from .adam_cosine import AdamCosine, AdamCosineConfig
 from .adaptive import Adaptive, AdaptiveConfig
 from .lookahead import Lookahead, LookaheadConfig
 from .common import OptimizerConfig
@@ -19,6 +20,8 @@ from .pcvi import (
 
 classes = [
     "AdamConfig",
+    "AdamCosine",
+    "AdamCosineConfig",
     "Adaptive",
     "AdaptiveConfig",
     "AdaptiveExtragradientConfig",
@@ -35,6 +38,7 @@ classes = [
 # This is used to aid loading of optimizers from yaml
 optimizer_config_registry = {
     "adam": AdamConfig,
+    "adam_cosine": AdamCosineConfig,
     "adaptive": AdaptiveConfig,
     "extragradient": ExtragradientConfig,
     "adaptive_extragradient": AdaptiveExtragradientConfig,

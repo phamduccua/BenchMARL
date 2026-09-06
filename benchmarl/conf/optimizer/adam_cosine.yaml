@@ -1,0 +1,18 @@
+defaults:
+  - adam_cosine_config
+  - _self_
+
+# Control branch for pc / pcvi / adaptive, all of which shrink their effective
+# step as training proceeds. Without this branch, "pcvi beats adam" cannot be
+# told apart from "a decaying step beats a constant one".
+
+# null = read experiment.lr (the 5e-5 that was tuned for Adam). This is the PEAK
+# of the schedule, so the comparison is against the same Adam at its tuned lr.
+lr: null
+eps: null
+# The floor of the cosine. 0.0 means the run ends at a zero step.
+eta_min: 0.0
+# null = derive from experiment.max_n_iters / max_n_frames. Must be set by hand
+# for off-policy algorithms.
+total_steps: null
+extra_kwargs: null
