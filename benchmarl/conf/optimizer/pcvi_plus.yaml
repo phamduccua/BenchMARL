@@ -1,0 +1,54 @@
+defaults:
+  - pcvi_plus_config
+  - _self_
+
+# Algorithm 1 plus the four departures a real run showed it needs. Each is a
+# separate flag: set it to the value in the comment to get the faithful `pcvi`
+# behaviour back for that one mechanism, and measure what it was worth.
+
+# --- Step 1 of the paper, unchanged -----------------------------------------
+lambda_0: 0.01
+beta: 1.95
+p: 0.5
+gamma: 1.0
+
+# --- 1. lambda may recover -------------------------------------------------
+# Largest factor lambda may rise by in one step. 1.0 = the paper's monotone
+# lambda. lambda never exceeds lambda_0 whatever this is.
+lambda_growth: 1.1
+
+# --- 2. refuse a probe below the numerical noise floor ----------------------
+# Hold lambda when ||u_k - v_k|| < min_probe_rel * ||theta||. 0.0 = off.
+# 1e-5 is ~an order above float32 epsilon (1.2e-7) for safety.
+min_probe_rel: 1.0e-5
+# The scalar reductions in float64. Formula (3.1) computes "a - a + b"
+# explicitly: measured error 3.1e-5 in float32 against 3.6e-15 in float64.
+float64_stats: true
+# A floor is still useful as a last resort, but with 1 and 2 on it should not
+# be what saves the run. Watch pcvi_lambda: if it sits exactly here, the two
+# mechanisms above failed and the floor is doing the work.
+lambda_min: 1.0e-8
+
+# --- 3. beta_k < 0 falls back to extragradient ------------------------------
+# null = faithful (use the negative value, moving against d_k).
+# 1.0 = plain extragradient for that step.
+beta_fallback: 1.0
+beta_k_min: null
+beta_k_max: null
+
+# --- 4. run Steps 3-6 in Adam's metric --------------------------------------
+precond: true
+precond_beta2: 0.999
+precond_eps: 1.0e-8
+# AMSGrad keeps v_hat monotone, so P converges; without it the metric keeps
+# moving and nothing about the iteration is stable.
+precond_amsgrad: true
+# Clamp on P, symmetric: P in [1/clamp, clamp].
+precond_clamp: 1000.0
+
+# --- unchanged from pcvi ----------------------------------------------------
+eps_denominator: 1.0e-12
+use_identity_dk: false
+reset_lambda_per_batch: false
+use_adaptive_lambda: true
+use_contraction: true

@@ -329,6 +329,22 @@ def test_state_dict_roundtrip():
     assert new.n_steps == opt.n_steps
 
 
+# The four departures from Algorithm 1. They live on Pcvi.__init__ with neutral
+# defaults, and only PcviPlusConfig exposes them; every faithful config omits
+# them on purpose, which is what these invariants have to allow for.
+DEPARTURES = {
+    "lambda_growth",
+    "min_probe_rel",
+    "beta_fallback",
+    "float64_stats",
+    "precond",
+    "precond_beta2",
+    "precond_eps",
+    "precond_amsgrad",
+    "precond_clamp",
+}
+
+
 def test_config_fields_match_optimizer_signature():
     """The 3 places that must agree: yaml <-> PcviConfig <-> Pcvi.__init__."""
     import inspect
@@ -338,9 +354,12 @@ def test_config_fields_match_optimizer_signature():
     for field in config.__dict__:
         assert field in signature, f"{field} is in PcviConfig but not in Pcvi.__init__"
     for name in signature:
-        if name in ("self", "params"):
+        if name in ("self", "params") or name in DEPARTURES:
             continue
         assert name in config.__dict__, f"{name} is in Pcvi.__init__ but not in the yaml"
+    assert not (set(config.__dict__) & DEPARTURES), (
+        "pcvi.yaml has to stay the paper; the departures belong to pcvi_plus.yaml"
+    )
 
 
 def test_config_yaml_defaults_are_faithful_to_the_paper():
@@ -480,8 +499,8 @@ def test_pc_config_yaml_and_signature():
     assert set(config.__dict__) < signature
     assert "p" not in config.__dict__
     assert "lambda_min" not in config.__dict__
-    # but _optimizer_kwargs must supply every argument, exactly
-    assert set(config._optimizer_kwargs(None)) == signature
+    # but _optimizer_kwargs must supply every argument of Algorithm 1 proper
+    assert set(config._optimizer_kwargs(None)) == signature - DEPARTURES
 
 
 def test_pc_config_defaults():
@@ -632,7 +651,10 @@ def test_extragradient_configs_and_yaml():
         for absent in ("beta", "gamma", "use_contraction", "use_adaptive_lambda"):
             assert absent not in config.__dict__, f"{absent} should not be exposed"
         kwargs = config._optimizer_kwargs(None)
-        assert set(kwargs) == signature
+        # The variants predate the four departures and do not set them, so Pcvi's
+        # own defaults (all neutral) apply. What they must cover is every
+        # parameter of Algorithm 1 proper.
+        assert set(kwargs) == signature - DEPARTURES
         assert kwargs["use_contraction"] is False
         assert kwargs["use_adaptive_lambda"] is adaptive
         assert kwargs["beta"] == 1.0 and kwargs["gamma"] == 1.0

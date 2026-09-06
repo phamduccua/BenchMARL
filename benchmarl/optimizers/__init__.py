@@ -16,6 +16,7 @@ from .pcvi import (
     PcConfig,
     Pcvi,
     PcviConfig,
+    PcviPlusConfig,
 )
 
 classes = [
@@ -31,6 +32,7 @@ classes = [
     "PcConfig",
     "Pcvi",
     "PcviConfig",
+    "PcviPlusConfig",
     "SgdConfig",
 ]
 
@@ -45,5 +47,6 @@ optimizer_config_registry = {
     "lookahead": LookaheadConfig,
     "pc": PcConfig,
     "pcvi": PcviConfig,
+    "pcvi_plus": PcviPlusConfig,
     "sgd": SgdConfig,
 }

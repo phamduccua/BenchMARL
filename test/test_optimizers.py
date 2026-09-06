@@ -72,12 +72,34 @@ def test_registry_configs_load_from_yaml():
 
 
 def test_pcvi_yaml_matches_dataclass_and_signature():
-    """The 3 places that must agree: yaml <-> PcviConfig <-> Pcvi.__init__."""
+    """The 3 places that must agree: yaml <-> PcviConfig <-> Pcvi.__init__.
+
+    ``PcviConfig`` is the paper: it exposes exactly the parameters Algorithm 1
+    has. ``Pcvi.__init__`` also carries the four departures, which only
+    ``PcviPlusConfig`` exposes, so the faithful config is a strict *subset* of
+    the signature and the plus config covers all of it.
+    """
     import inspect
 
-    config = PcviConfig.get_from_yaml()
-    signature = inspect.signature(Pcvi.__init__).parameters
-    assert set(config.__dict__) == set(signature) - {"self", "params"}
+    from benchmarl.optimizers import PcviPlusConfig
+
+    signature = set(inspect.signature(Pcvi.__init__).parameters) - {"self", "params"}
+    faithful = set(PcviConfig.get_from_yaml().__dict__)
+    plus = set(PcviPlusConfig.get_from_yaml().__dict__)
+
+    assert faithful < signature, "pcvi must not expose knobs Pcvi does not have"
+    assert plus == signature, "pcvi_plus must expose every one of them"
+    assert signature - faithful == {
+        "lambda_growth",
+        "min_probe_rel",
+        "beta_fallback",
+        "float64_stats",
+        "precond",
+        "precond_beta2",
+        "precond_eps",
+        "precond_amsgrad",
+        "precond_clamp",
+    }, "the departures from the paper, and nothing else, are what pcvi omits"
 
 
 # ------------------------------------------------------- Adam is unchanged

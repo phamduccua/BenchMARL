@@ -39,7 +39,14 @@ from typing import Any, Dict, List, Optional, Type
 
 import torch
 
-from benchmarl.optimizers._lambda import adaptive_lambda, global_dot, global_norm
+from benchmarl.optimizers._lambda import (
+    adaptive_lambda,
+    global_dot,
+    global_dot_weighted,
+    global_norm,
+    global_norm_weighted,
+    to_float64,
+)
 from benchmarl.optimizers.common import OptimizerConfig
 
 
@@ -131,6 +138,15 @@ class Pcvi(torch.optim.Optimizer):
         reset_lambda_per_batch: bool = False,
         use_adaptive_lambda: bool = True,
         use_contraction: bool = True,
+        lambda_growth: float = 1.0,
+        min_probe_rel: float = 0.0,
+        beta_fallback: Optional[float] = None,
+        float64_stats: bool = False,
+        precond: bool = False,
+        precond_beta2: float = 0.999,
+        precond_eps: float = 1e-8,
+        precond_amsgrad: bool = True,
+        precond_clamp: float = 1e3,
     ):
         if not lambda_0 > 0:
             raise ValueError(f"lambda_0 has to be > 0, got {lambda_0}")
@@ -156,6 +172,30 @@ class Pcvi(torch.optim.Optimizer):
                 f"skipped when use_contraction=False (beta_k is pinned to 1). "
                 f"Leave them at 1.0 so it is clear they play no part."
             )
+        if lambda_growth < 1.0:
+            raise ValueError(
+                f"lambda_growth has to be >= 1.0, got {lambda_growth}. 1.0 is the "
+                f"paper's non-increasing lambda; above it, lambda may recover."
+            )
+        if not use_adaptive_lambda and lambda_growth != 1.0:
+            raise ValueError(
+                f"lambda_growth ({lambda_growth}) is meaningless with "
+                f"use_adaptive_lambda=False: lambda never moves."
+            )
+        if min_probe_rel < 0:
+            raise ValueError(f"min_probe_rel has to be >= 0, got {min_probe_rel}")
+        if beta_fallback is not None and not 0 <= beta_fallback <= 2:
+            raise ValueError(
+                f"beta_fallback has to be in [0, 2] or None, got {beta_fallback}"
+            )
+        if precond and not 0 < precond_beta2 < 1:
+            raise ValueError(
+                f"precond_beta2 has to be in (0, 1), got {precond_beta2}"
+            )
+        if precond and precond_clamp <= 1:
+            raise ValueError(
+                f"precond_clamp has to be > 1, got {precond_clamp}"
+            )
         if not use_adaptive_lambda and lambda_min:
             raise ValueError(
                 f"lambda_min ({lambda_min}) is meaningless with "
@@ -178,6 +218,15 @@ class Pcvi(torch.optim.Optimizer):
                 "reset_lambda_per_batch": reset_lambda_per_batch,
                 "use_adaptive_lambda": use_adaptive_lambda,
                 "use_contraction": use_contraction,
+                "lambda_growth": lambda_growth,
+                "min_probe_rel": min_probe_rel,
+                "beta_fallback": beta_fallback,
+                "float64_stats": float64_stats,
+                "precond": precond,
+                "precond_beta2": precond_beta2,
+                "precond_eps": precond_eps,
+                "precond_amsgrad": precond_amsgrad,
+                "precond_clamp": precond_clamp,
             },
         )
         if len(self.param_groups) != 1:
@@ -198,9 +247,27 @@ class Pcvi(torch.optim.Optimizer):
         self.reset_lambda_per_batch = reset_lambda_per_batch
         self.use_adaptive_lambda = use_adaptive_lambda
         self.use_contraction = use_contraction
+        self.lambda_growth = lambda_growth
+        self.min_probe_rel = min_probe_rel
+        self.beta_fallback = beta_fallback
+        self.float64_stats = float64_stats
+        self.precond = precond
+        self.precond_beta2 = precond_beta2
+        self.precond_eps = precond_eps
+        self.precond_amsgrad = precond_amsgrad
+        self.precond_clamp = precond_clamp
 
         self.lambda_k = lambda_0
         self.n_steps = 0
+        # counters for the departures from the paper, so a run can report how
+        # often each one actually fired instead of assuming it never did
+        self.n_probe_too_small = 0
+        self.n_beta_fallback = 0
+        # diagonal preconditioner state, allocated lazily on the first probe
+        self._p_diag: Optional[List[torch.Tensor]] = None
+        self._v_ema: Optional[List[torch.Tensor]] = None
+        self._v_max: Optional[List[torch.Tensor]] = None
+        self._precond_steps = 0
         # filled between probe() and apply()
         self._u: Optional[List[torch.Tensor]] = None
         self._f_u: Optional[List[torch.Tensor]] = None
@@ -247,8 +314,51 @@ class Pcvi(torch.optim.Optimizer):
         self._u = [prm.detach().clone() for prm in params]
         self._f_u = self._gather_grads()
         self._probe_lambda = self.lambda_k
+        if self.precond:
+            # Step 3 in the metric P: v_k = u_k - lambda_k P F(u_k). P is Adam's
+            # diagonal, so the probe -- and every norm below -- lives in the
+            # geometry the preconditioner induces. AMSGrad keeps v_hat monotone,
+            # hence P convergent, which is what makes a fixed-metric reading of
+            # the algorithm defensible at all.
+            self._update_preconditioner(self._f_u)
+            direction = torch._foreach_mul(self._f_u, self._p_diag)
+        else:
+            direction = self._f_u
         # Step 3: v_k = u_k - lambda_k F(u_k)
-        torch._foreach_add_(params, self._f_u, alpha=-self._probe_lambda)
+        torch._foreach_add_(params, direction, alpha=-self._probe_lambda)
+
+    @torch.no_grad()
+    def _update_preconditioner(self, grads: List[torch.Tensor]):
+        """Adam's diagonal ``P = 1 / (sqrt(v_hat) + eps)``, clamped.
+
+        Not in the paper. ``pc``/``pcvi`` drop Adam's per-coordinate scaling
+        entirely, which is the handicap the ``sgd`` control exists to measure;
+        this puts it back without changing Steps 4-6, by reading them in the
+        ``P^-1`` metric instead of the Euclidean one.
+        """
+        if self._v_ema is None:
+            self._v_ema = [torch.zeros_like(g) for g in grads]
+            self._v_max = [torch.zeros_like(g) for g in grads]
+            self._precond_steps = 0
+        self._precond_steps += 1
+        beta2 = self.precond_beta2
+        bias = 1.0 - beta2**self._precond_steps
+        p_diag = []
+        for ema, vmax, g in zip(self._v_ema, self._v_max, grads):
+            # Never feed the bias-corrected or max-ed value back into the EMA.
+            ema.mul_(beta2).addcmul_(g, g, value=1.0 - beta2)
+            corrected = ema / bias
+            if self.precond_amsgrad:
+                torch.maximum(vmax, corrected, out=vmax)
+                used = vmax
+            else:
+                used = corrected
+            p_diag.append(
+                (1.0 / (used.sqrt() + self.precond_eps)).clamp(
+                    1.0 / self.precond_clamp, self.precond_clamp
+                )
+            )
+        self._p_diag = p_diag
 
     @torch.no_grad()
     def restore(self):
@@ -275,12 +385,49 @@ class Pcvi(torch.optim.Optimizer):
         self._u = self._f_u = None
         del u
 
+        # P = 1 everywhere when the preconditioner is off, so the expressions
+        # below are the paper's verbatim in that case.
+        p_diag = self._p_diag if self.precond else None
+        weight = (  # the P^-1 metric; 1 means Euclidean
+            [1.0 / pd for pd in p_diag] if p_diag is not None else None
+        )
+
         # Step 3 (continued): lambda_{k+1}
         diff = torch._foreach_sub(f_u, f_v)  # F(u_k) - F(v_k)
-        norm_diff = global_norm(diff)
+        # u_k - v_k = lambda_k P F(u_k)
+        uv = torch._foreach_mul(
+            torch._foreach_mul(f_u, p_diag) if p_diag is not None else f_u, lam
+        )
+        if self.float64_stats:
+            stat_uv, stat_diff = to_float64(uv), to_float64(diff)
+            stat_w = to_float64(weight) if weight is not None else None
+        else:
+            stat_uv, stat_diff, stat_w = uv, diff, weight
+        if stat_w is not None:
+            norm_uv = global_norm_weighted(stat_uv, stat_w)
+            # ||P dF||_{P^-1} = sqrt(sum P dF^2)
+            norm_diff = global_norm_weighted(stat_diff, to_float64(p_diag)
+                                             if self.float64_stats else p_diag)
+        else:
+            norm_uv = global_norm(stat_uv)
+            norm_diff = global_norm(stat_diff)
         norm_f_u = global_norm(f_u)
-        norm_uv = lam * norm_f_u  # ||u_k - v_k|| = lambda_k ||F(u_k)||
-        if self.use_adaptive_lambda:
+
+        # The probe displacement has to be resolvable in the working precision:
+        # below that, ||F(u)-F(v)|| is rounding noise rather than an operator
+        # difference, the Lipschitz estimate is meaningless, and feeding it to
+        # Step 3 drives lambda to zero and never recovers. Measured on
+        # matrixgame/rock_paper_scissors: 1e-2 -> 1.5e-10 with the branch frozen.
+        probe_too_small = False
+        if self.min_probe_rel > 0.0:
+            norm_theta = global_norm(params)
+            probe_too_small = (
+                norm_uv.item() < self.min_probe_rel * max(norm_theta.item(), 1e-30)
+            )
+            if probe_too_small:
+                self.n_probe_too_small += 1
+
+        if self.use_adaptive_lambda and not probe_too_small:
             lambda_next = adaptive_lambda(
                 lambda_k=lam,
                 norm_delta=norm_uv,
@@ -288,19 +435,32 @@ class Pcvi(torch.optim.Optimizer):
                 p=self.p,
                 eps_denominator=self.eps_denominator,
                 lambda_min=self.lambda_min,  # lambda_min is not in the paper
+                growth=self.lambda_growth,  # nor is growth
+                lambda_max=self.lambda_0,  # keep lambda_0 an upper bound
             )
         else:
-            lambda_next = lam  # "pc": lambda is a constant
+            # "pc": lambda is a constant. Or: the probe was below the noise floor,
+            # so lambda is held rather than updated from a meaningless ratio.
+            lambda_next = lam
 
         # Step 4: d_k
-        uv = torch._foreach_mul(f_u, lam)  # u_k - v_k
         if self.use_identity_dk:
-            d = torch._foreach_mul(f_v, lam)  # d_k = lambda_k F(v_k)
+            # d_k = lambda_k P F(v_k)
+            d = torch._foreach_mul(
+                torch._foreach_mul(f_v, p_diag) if p_diag is not None else f_v, lam
+            )
         else:
-            d = torch._foreach_sub(uv, torch._foreach_mul(diff, lam))
+            scaled_diff = (
+                torch._foreach_mul(diff, p_diag) if p_diag is not None else diff
+            )
+            d = torch._foreach_sub(uv, torch._foreach_mul(scaled_diff, lam))
 
         # Step 5: beta_k
-        norm_d = global_norm(d)
+        stat_d = to_float64(d) if self.float64_stats else d
+        norm_d = (
+            global_norm_weighted(stat_d, stat_w) if stat_w is not None
+            else global_norm(stat_d)
+        )
         # The paper branches on ``||d_k|| > 0``. In floating point, ``||d_k||`` can
         # be nonzero but at roundoff level, and then beta_k = 0/0 is pure noise
         # (though harmless: beta_k * d_k is still ~0). eps_denominator is the
@@ -309,13 +469,29 @@ class Pcvi(torch.optim.Optimizer):
             # extragradient: u_{k+1} = u_k - d_k = u_k - lambda_k F(v_k)
             beta_k_raw = 1.0
         elif norm_d.item() > self.eps_denominator:
-            beta_k_raw = self.beta * global_dot(uv, d).item() / (norm_d**2).item()
+            numerator = (
+                global_dot_weighted(stat_uv, stat_d, stat_w) if stat_w is not None
+                else global_dot(stat_uv, stat_d)
+            )
+            beta_k_raw = self.beta * numerator.item() / (norm_d**2).item()
         else:
             # d_k = 0, so u_{k+1} = u_k whatever gamma is (see the docstring).
             beta_k_raw = self.gamma
         if not math.isfinite(beta_k_raw):
             beta_k_raw = self.gamma
-        beta_k = min(max(beta_k_raw, self.beta_k_min), self.beta_k_max)
+        beta_k = beta_k_raw
+        used_fallback = False
+        if self.beta_fallback is not None and beta_k_raw < 0.0:
+            # beta_k < 0 means <u_k - v_k, d_k> < 0: the inverse-strong-monotonicity
+            # the contraction rests on does not hold at this iterate, and the
+            # faithful step would move AGAINST d_k. Falling back to beta_k = 1 is
+            # a plain extragradient step, which needs no such assumption -- a
+            # weaker method rather than a wrong one. How often it fires is itself
+            # the measurement of how badly ISM is violated: see n_beta_fallback.
+            beta_k = self.beta_fallback
+            used_fallback = True
+            self.n_beta_fallback += 1
+        beta_k = min(max(beta_k, self.beta_k_min), self.beta_k_max)
 
         # Step 6: u_{k+1} = u_k - beta_k d_k
         torch._foreach_add_(params, d, alpha=-beta_k)
@@ -336,6 +512,11 @@ class Pcvi(torch.optim.Optimizer):
             "pcvi_grad_corr": (global_dot(f_u, f_v).item() / denom) if denom > 0 else 0.0,
             "pcvi_grad_norm": norm_f_u.item(),
             "pcvi_d_norm": norm_d.item(),
+            # The departures from the paper, each reported so a run can say how
+            # often it actually mattered rather than leaving it to be assumed.
+            "pcvi_probe_too_small": float(probe_too_small),
+            "pcvi_beta_fallback": float(used_fallback),
+            "pcvi_lambda_grew": float(lambda_next > lam),
         }
 
     def step(self, closure=None) -> Dict[str, float]:
@@ -548,3 +729,52 @@ class PcviConfig(OptimizerConfig):
         if kwargs.get("beta_k_max", None) is None:
             kwargs["beta_k_max"] = math.inf
         return kwargs
+
+
+@dataclass
+class PcviPlusConfig(PcviConfig):
+    """Algorithm 1 with the four departures that a real run showed it needs.
+
+    Every one of them is off in :class:`PcviConfig`, whose defaults stay faithful
+    to the paper, and each is a separate flag here so its contribution can be
+    measured rather than assumed. What follows is why each exists, with the
+    measurement that motivated it -- all from
+    ``matrixgame/rock_paper_scissors``, 6 branches x 10 seeds, 500K frames:
+
+    1. ``lambda_growth`` -- the paper's ``lambda_{k+1} = min(..., lambda_k)`` is
+       non-increasing, so with stochastic gradients one bad
+       ``||F(u_k)-F(v_k)||`` lowers ``lambda`` for good. Measured: ``lambda``
+       fell from 1e-2 to **1.5e-10** and the branch stopped moving entirely
+       (effective step 3e-10 against a gradient norm of 0.42). Allowing a bounded
+       rise lets it recover; ``lambda_0`` is kept as a ceiling so it remains an
+       upper bound on the step, as it is in the paper.
+    2. ``min_probe_rel`` -- once ``||u_k - v_k||`` falls below the working
+       precision relative to ``||theta||``, ``F(u_k) - F(v_k)`` is rounding noise
+       and the Lipschitz estimate built from it is meaningless. Feeding it to
+       Step 3 is what drives the collapse above. Below the threshold ``lambda``
+       is held instead of updated.
+    3. ``beta_fallback`` -- ``beta_k < 0`` means ``<u_k - v_k, d_k> < 0``: the
+       inverse strong monotonicity the contraction rests on does not hold there,
+       and the faithful step moves *against* ``d_k``. Measured: player_1 ran at
+       ``beta_k = -0.22`` while player_0 sat at +1.95. Falling back to
+       ``beta_k = 1`` is a plain extragradient step, which needs no such
+       assumption. How often it fires is the measurement of the violation.
+    4. ``precond`` -- ``pc``/``pcvi`` drop Adam's per-coordinate scaling, which
+       is the handicap the ``sgd`` control exists to isolate. This runs Steps 3-6
+       in the metric induced by Adam's diagonal ``P``, with AMSGrad keeping
+       ``v_hat`` monotone so ``P`` converges. Steps 4-6 are unchanged; only the
+       inner product they are read in changes.
+
+    Points 1-3 make Algorithm 1 survive stochastic gradients. Point 4 extends it.
+    All four are departures from the paper and must be declared as such.
+    """
+
+    lambda_growth: float = MISSING
+    min_probe_rel: float = MISSING
+    beta_fallback: Optional[float] = MISSING
+    float64_stats: bool = MISSING
+    precond: bool = MISSING
+    precond_beta2: float = MISSING
+    precond_eps: float = MISSING
+    precond_amsgrad: bool = MISSING
+    precond_clamp: float = MISSING
