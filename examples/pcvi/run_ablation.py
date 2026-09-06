@@ -150,6 +150,18 @@ def build(args, optimizer_name: str, seed: int):
     return experiment, two_gradient
 
 
+# The number worth putting in the summary table, per task family. `mean_return`
+# is not it: the logger averages the episode reward OVER GROUPS, and simple_tag's
+# two groups collect +10 and -10 for the very same collision, so it sits at ~0
+# however well the predators learn.
+_TASK_METRIC = {
+    "vmas/simple_tag": ("catches_per_episode", "catch/ep"),
+    "vmas/simple_world_comm": ("catches_per_episode", "catch/ep"),
+    "matrixgame/rock_paper_scissors": ("nash_conv", "nash_conv"),
+    "matrixgame/matching_pennies": ("nash_conv", "nash_conv"),
+}
+
+
 def run_one(args, optimizer_name: str, seed: int):
     experiment, two_gradient = build(args, optimizer_name, seed)
     started = time.time()
@@ -159,6 +171,12 @@ def run_one(args, optimizer_name: str, seed: int):
         "seconds": time.time() - started,
         "two_gradient": two_gradient,
     }
+    key, _ = _TASK_METRIC.get(args.task, (None, None))
+    if key is not None:
+        for callback in experiment.callbacks:
+            if key in getattr(callback, "last_stats", {}):
+                result["metric"] = callback.last_stats[key]
+                break
     # optimizer-specific diagnostics, if the optimizer exposes them
     optimizer = next(iter(next(iter(experiment.optimizers.values())).values()))
     for attribute in ("lambda_k", "lambda_0", "n_syncs"):
@@ -269,21 +287,28 @@ def main():
         results[optimizer_name] = per_seed
 
     print()
+    _, metric_label = _TASK_METRIC.get(args.task, (None, None))
+    metric_label = metric_label or "-"
     print(
-        f"{'optimizer':<24}{'return':>20}{'sec/run':>10}{'grad/step':>11}"
-        f"{'lambda_end':>13}"
+        f"{'optimizer':<24}{metric_label:>20}{'return':>10}{'sec/run':>10}"
+        f"{'grad/step':>11}{'lambda_end':>13}"
     )
-    print("-" * 78)
+    print("-" * 88)
     for optimizer_name, per_seed in results.items():
-        returns = [r["return"] for r in per_seed]
-        mean = statistics.fmean(returns)
-        std = statistics.stdev(returns) if len(returns) > 1 else 0.0
+        metrics = [r["metric"] for r in per_seed if "metric" in r]
+        if metrics:
+            mean = statistics.fmean(metrics)
+            std = statistics.stdev(metrics) if len(metrics) > 1 else 0.0
+            metric_cell = f"{mean:>11.3f} {plus_minus} {std:<6.3f}"
+        else:
+            metric_cell = f"{'-':>20}"
         seconds = statistics.fmean(r["seconds"] for r in per_seed)
         grads = 2 if per_seed[0]["two_gradient"] else 1
         lambdas = [r["lambda_k"] for r in per_seed if "lambda_k" in r]
         lambda_cell = f"{statistics.fmean(lambdas):.3e}" if lambdas else "-"
+        returns = statistics.fmean(r["return"] for r in per_seed)
         print(
-            f"{optimizer_name:<24}{mean:>11.3f} {plus_minus} {std:<6.3f}"
+            f"{optimizer_name:<24}{metric_cell}{returns:>10.3f}"
             f"{seconds:>10.1f}{grads:>11}{lambda_cell:>13}"
         )
 
@@ -295,7 +320,10 @@ def main():
         "    --half-epochs for an equal-compute comparison.\n"
         "  * include `--optimizers sgd adam_cosine` before attributing any\n"
         "    difference to the algorithm rather than to the preconditioner\n"
-        "    (sgd) or to the learning-rate schedule (adam_cosine)."
+        "    (sgd) or to the learning-rate schedule (adam_cosine).\n"
+        "  * `return` averages the episode reward OVER GROUPS. On simple_tag the\n"
+        "    two groups earn +10 and -10 for the same collision, so it sits at\n"
+        "    ~0 however well the predators learn: read the first column instead."
     )
     if len(args.seeds) < 5:
         print(f"  * {len(args.seeds)} seed(s) is not enough to compare returns.")

@@ -68,6 +68,7 @@ class NashDistanceCallback(Callback):
     def __init__(self, game: Optional[str] = None):
         super().__init__()
         self.game = game
+        self.last_stats: Dict[str, float] = {}
 
     def on_setup(self):
         from benchmarl.environments.matrixgame.matrix_game import (
@@ -153,6 +154,9 @@ class NashDistanceCallback(Callback):
             for name, probability in zip(self.action_names, policy.tolist()):
                 to_log[f"eval/action_prob_{player}_{name}"] = probability
 
+        self.last_stats = {key.removeprefix("eval/"): value
+                           for key, value in to_log.items()}
+
         self.experiment.logger.log(to_log, step=self.experiment.n_iters_performed)
 
 
@@ -199,6 +203,7 @@ class WinRateCallback(Callback):
         self.predator_group = predator_group
         self.catch_reward = catch_reward
         self.min_catches_to_win = min_catches_to_win
+        self.last_stats: Dict[str, float] = {}
 
     def on_setup(self):
         if self.predator_group not in self.experiment.group_map:
@@ -245,4 +250,10 @@ class WinRateCallback(Callback):
             "eval/catches_per_episode": sum(s["catches"] for s in stats) / n,
             "eval/n_episodes": float(n),
         }
+        # Kept so a runner can put a meaningful number in its summary table.
+        # `mean_return` cannot: it averages over groups, and simple_tag's two
+        # groups earn +10 and -10 for the same collision, so it sits at ~0
+        # however well the predators learn.
+        self.last_stats = {key.removeprefix("eval/"): value
+                           for key, value in to_log.items()}
         self.experiment.logger.log(to_log, step=self.experiment.n_iters_performed)
