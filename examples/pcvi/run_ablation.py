@@ -172,11 +172,12 @@ def main():
                         default=["adam", "pc", "adaptive", "pcvi"],
                         choices=sorted(optimizer_config_registry))
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
-    parser.add_argument("--iters", type=int, default=500)
-    parser.add_argument("--frames-per-batch", type=int, default=6000)
-    parser.add_argument("--n-envs", type=int, default=10)
-    parser.add_argument("--minibatch-size", type=int, default=400)
-    parser.add_argument("--epochs", type=int, default=45)
+    parser.add_argument("--iters", type=int, default=17,
+                        help="collection rounds; 17 x 120000 = 2.04M frames")
+    parser.add_argument("--frames-per-batch", type=int, default=120000)
+    parser.add_argument("--n-envs", type=int, default=200)
+    parser.add_argument("--minibatch-size", type=int, default=4096)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--eval-every", type=int, default=None,
                         metavar="ROUNDS",

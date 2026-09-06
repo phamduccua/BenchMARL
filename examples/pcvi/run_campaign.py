@@ -56,12 +56,25 @@ _ABLATION = _HERE / "run_ablation.py"
 # The task matters: a matrix game has no physics to simulate and comes out ~40%
 # cheaper, so quoting the simple_tag numbers for it would overstate the cost by
 # more than half.
+# Measured at the CURRENT default config -- n_envs 200, frames_per_batch 120000,
+# minibatch 4096, 15 epochs, i.e. 450 updates per 120000 frames -- on this
+# project's 12-core CPU. The old numbers, 1.91 and 3.09, were for 10 envs and
+# 675 updates per 6000 frames: eight times slower for the same frames.
+# On the same machine's Quadro P1000, cuda gave 0.35 / 0.42 -- still not ahead,
+# but the two-gradient branch has drawn level, where at n_envs=10 cuda was 2x
+# behind. On a bigger GPU it should win; measure it.
 _HOURS_PER_MFRAME = {
-    "vmas/simple_tag": {1: 1.91, 2: 3.09},
-    "matrixgame/rock_paper_scissors": {1: 1.08, 2: 1.92},
-    "matrixgame/matching_pennies": {1: 1.08, 2: 1.92},
+    "vmas/simple_tag": {1: 0.24, 2: 0.42},
 }
 _UNMEASURED_TASK = "vmas/simple_tag"  # what an unmeasured task is quoted at
+# 4 cells at 3 threads each finished in 209.3 s against 414.8 s one at a time on
+# 12 cores. Not 4x: the cells contend. Re-measure on a different machine.
+_MEASURED_SPEEDUP = 1.98
+# The config the rates above were measured at: 15 * ceil(120000/4096) = 450
+# updates per 120000 frames. A different config is rescaled by this ratio, which
+# only corrects the gradient part -- the environment simulation is unaffected by
+# it -- so the further you move from here, the rougher the estimate.
+_REFERENCE_UPDATES_PER_FRAME = 450 / 120000
 
 
 def _cell_dir(args, optimizer: str, seed: int) -> pathlib.Path:
@@ -181,9 +194,12 @@ def _estimate_hours(args, optimizer: str) -> float:
     if args.half_epochs and grads == 2:
         epochs = max(1, epochs // 2)
     rates = _HOURS_PER_MFRAME.get(args.task, _HOURS_PER_MFRAME[_UNMEASURED_TASK])
-    # The measurement was taken at 45 epochs. Cost is close to linear in the
-    # number of gradient steps, which is epochs * ceil(batch / minibatch).
-    return rates[grads] * frames / 1e6 * (epochs / 45.0)
+    # Cost tracks gradient steps per frame, not epochs: the reference measurement
+    # did epochs * ceil(batch / minibatch) updates for every `batch` frames, and
+    # so does this config, but with wildly different numbers.
+    updates = epochs * -(-args.frames_per_batch // args.minibatch_size)
+    per_frame = updates / args.frames_per_batch
+    return rates[grads] * frames / 1e6 * (per_frame / _REFERENCE_UPDATES_PER_FRAME)
 
 
 def main():
@@ -196,14 +212,14 @@ def main():
                         default=["adam", "adam_cosine", "sgd", "pc", "adaptive", "pcvi"],
                         choices=sorted(optimizer_config_registry))
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
-    parser.add_argument("--iters", type=int, default=500,
-                        help="collection rounds; 500 x 6000 frames = 3M frames")
-    parser.add_argument("--frames-per-batch", type=int, default=6000)
-    parser.add_argument("--n-envs", type=int, default=10)
-    parser.add_argument("--minibatch-size", type=int, default=400)
-    parser.add_argument("--epochs", type=int, default=45)
+    parser.add_argument("--iters", type=int, default=17,
+                        help="collection rounds; 17 x 120000 = 2.04M frames")
+    parser.add_argument("--frames-per-batch", type=int, default=120000)
+    parser.add_argument("--n-envs", type=int, default=200)
+    parser.add_argument("--minibatch-size", type=int, default=4096)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--episodes", type=int, default=10)
-    parser.add_argument("--eval-every", type=int, default=10, metavar="ROUNDS",
+    parser.add_argument("--eval-every", type=int, default=1, metavar="ROUNDS",
                         help="evaluate every ROUNDS collection rounds. run_ablation's "
                              "own default is iters // 4, which gives four points "
                              "however long the run is and cannot be plotted against "
@@ -248,14 +264,35 @@ def main():
     print("\nEstimated cost (extrapolated from a 2-round measurement, not a guarantee"
           + ("):" if measured else f"; {args.task} was never measured, quoting "
                                    f"{_UNMEASURED_TASK} rates):"))
+    updates = args.epochs * -(-args.frames_per_batch // args.minibatch_size)
+    ratio = (updates / args.frames_per_batch) / _REFERENCE_UPDATES_PER_FRAME
+    if ratio < 0.5 or ratio > 2.0:
+        print(f"  !! This config does {ratio:.2f}x the gradient steps per frame of the "
+              f"measured one\n"
+              f"     ({updates} updates per {args.frames_per_batch} frames against 450 "
+              f"per 120000). Only the\n"
+              f"     gradient part is rescaled, not the environment simulation, so this "
+              f"is a rough bound.")
+    if args.device != "cpu":
+        print(f"  !! The rates were measured on CPU. --device {args.device} was not, "
+              f"so the numbers below\n"
+              f"     do not apply -- run examples/pcvi/measure_throughput.py on this "
+              f"machine.")
     for optimizer in args.optimizers:
         each = _estimate_hours(args, optimizer)
         remaining = sum(1 for name, _ in todo if name == optimizer)
         print(f"  {optimizer:<16} {each:6.1f} h/seed x {remaining} remaining "
               f"= {each * remaining:7.1f} h")
-    print(f"  {'TOTAL':<16} {serial:6.1f} h serial  ->  "
-          f"~{serial / max(1, args.workers):.1f} h at {args.workers} workers "
-          f"(if the workers do not contend for cores)")
+    workers = max(1, args.workers)
+    print(f"  {'TOTAL':<16} {serial:6.1f} h serial")
+    if workers > 1:
+        # Perfect scaling is an upper bound that never happens: the cells contend
+        # for cores and memory bandwidth. Reporting serial/workers alone would
+        # promise a wall clock the machine cannot deliver.
+        print(f"  {'':<16} {serial / workers:6.1f} h at {workers} workers "
+              f"IF they scaled perfectly (they do not)")
+        print(f"  {'':<16} {serial / _MEASURED_SPEEDUP:6.1f} h at the speedup actually "
+              f"measured on this project's machine ({_MEASURED_SPEEDUP}x at 4 workers)")
 
     if args.dry_run:
         print("\n--dry-run: nothing was run.")
