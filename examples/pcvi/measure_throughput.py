@@ -130,8 +130,16 @@ def main():
           f"{args.frames_per_batch} frames | minibatch {args.minibatch_size} "
           f"x {args.epochs} epochs")
     print(f"= {updates} buoc gradient moi vong.")
-    if updates != 450:
-        print(f"!! Mac dinh cua run_ablation la 120000/4096/15 = 450 buoc moi vong.")
+    # The two configs the run book actually uses, from QUY_TRINH_CHAY.md.
+    known = {
+        450: "vmas/* (120000 frame/batch, minibatch 4096, 15 epoch)",
+        150: "matrixgame/* (10000 frame/batch, minibatch 1000, 15 epoch)",
+    }
+    if updates in known:
+        print(f"   = cau hinh {known[updates]} -- dung cai se chay that.")
+    else:
+        print(f"!! Khong khop cau hinh nao cua QUY_TRINH_CHAY.md "
+              f"({' hoac '.join(map(str, known))} buoc/vong).")
         print(f"!! Ban dang do MOT CAU HINH KHAC voi cai se chay that.")
     print()
 

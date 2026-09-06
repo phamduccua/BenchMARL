@@ -49,22 +49,25 @@ from benchmarl.optimizers import optimizer_config_registry
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _ABLATION = _HERE / "run_ablation.py"
-# Measured on this project's machine (12-core CPU) at the real per-round config,
-# 2 rounds x 6000 frames x 45 epochs. Hours per 1M frames, by gradients/update.
-# Used only by --dry-run, and only to give an order of magnitude.
+# Hours per 1M frames, keyed by device then by gradients per update. All measured
+# with measure_throughput.py at the CURRENT default config -- frames_per_batch
+# 120000, minibatch 4096, 15 epochs, i.e. 450 updates per 120000 frames.
 #
-# The task matters: a matrix game has no physics to simulate and comes out ~40%
-# cheaper, so quoting the simple_tag numbers for it would overstate the cost by
-# more than half.
-# Measured at the CURRENT default config -- n_envs 200, frames_per_batch 120000,
-# minibatch 4096, 15 epochs, i.e. 450 updates per 120000 frames -- on this
-# project's 12-core CPU. The old numbers, 1.91 and 3.09, were for 10 envs and
-# 675 updates per 6000 frames: eight times slower for the same frames.
-# On the same machine's Quadro P1000, cuda gave 0.35 / 0.42 -- still not ahead,
-# but the two-gradient branch has drawn level, where at n_envs=10 cuda was 2x
-# behind. On a bigger GPU it should win; measure it.
+# On the RTX 3090 the numbers fall until n_envs 2400 and then stop: 200 -> 0.12,
+# 600 -> 0.07, 1200 -> 0.05, 2400/4800/9600 -> 0.04 (adam). 1200 is the default
+# because it is the largest value that still collects one whole episode per env
+# per round, and the 20% left on the table above it is not worth truncating every
+# batch mid-episode for.
+#
+# For scale: the old config (10 envs, 675 updates per 6000 frames) cost 1.91 and
+# 3.09 h/Mframe on a 12-core CPU, and 5.92 / 9.52 on the rented box's CPU.
 _HOURS_PER_MFRAME = {
-    "vmas/simple_tag": {1: 0.24, 2: 0.42},
+    "cuda": {  # RTX 3090, n_envs 1200
+        "vmas/simple_tag": {1: 0.05, 2: 0.08},
+    },
+    "cpu": {  # 12-core Windows box, n_envs 200
+        "vmas/simple_tag": {1: 0.24, 2: 0.42},
+    },
 }
 _UNMEASURED_TASK = "vmas/simple_tag"  # what an unmeasured task is quoted at
 # 4 cells at 3 threads each finished in 209.3 s against 414.8 s one at a time on
@@ -193,7 +196,8 @@ def _estimate_hours(args, optimizer: str) -> float:
     epochs = args.epochs
     if args.half_epochs and grads == 2:
         epochs = max(1, epochs // 2)
-    rates = _HOURS_PER_MFRAME.get(args.task, _HOURS_PER_MFRAME[_UNMEASURED_TASK])
+    by_task = _HOURS_PER_MFRAME.get(args.device, _HOURS_PER_MFRAME["cpu"])
+    rates = by_task.get(args.task, by_task[_UNMEASURED_TASK])
     # Cost tracks gradient steps per frame, not epochs: the reference measurement
     # did epochs * ceil(batch / minibatch) updates for every `batch` frames, and
     # so does this config, but with wildly different numbers.
@@ -215,7 +219,12 @@ def main():
     parser.add_argument("--iters", type=int, default=17,
                         help="collection rounds; 17 x 120000 = 2.04M frames")
     parser.add_argument("--frames-per-batch", type=int, default=120000)
-    parser.add_argument("--n-envs", type=int, default=200)
+    parser.add_argument("--n-envs", type=int, default=1200,
+                        help="parallel VMAS environments. 1200 makes "
+                             "frames_per_batch/n_envs = 100, which is simple_tag's "
+                             "max_steps, so each env completes exactly one full "
+                             "episode per collection round and no advantage has to "
+                             "be bootstrapped from a truncation")
     parser.add_argument("--minibatch-size", type=int, default=4096)
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--episodes", type=int, default=10)
@@ -260,10 +269,14 @@ def main():
         print(f"{done_already} already finished, resuming the remaining {len(todo)}")
 
     serial = sum(_estimate_hours(args, optimizer) for optimizer, _ in todo)
-    measured = args.task in _HOURS_PER_MFRAME
-    print("\nEstimated cost (extrapolated from a 2-round measurement, not a guarantee"
+    by_task = _HOURS_PER_MFRAME.get(args.device, {})
+    measured = args.task in by_task
+    where = "RTX 3090" if args.device == "cuda" else "12-core CPU"
+    print(f"\nEstimated cost (from a 2-round measurement on a {where}, not a guarantee"
           + ("):" if measured else f"; {args.task} was never measured, quoting "
                                    f"{_UNMEASURED_TASK} rates):"))
+    if args.device not in _HOURS_PER_MFRAME:
+        print(f"  !! --device {args.device} was never measured; quoting cpu rates.")
     updates = args.epochs * -(-args.frames_per_batch // args.minibatch_size)
     ratio = (updates / args.frames_per_batch) / _REFERENCE_UPDATES_PER_FRAME
     if ratio < 0.5 or ratio > 2.0:
@@ -273,11 +286,12 @@ def main():
               f"per 120000). Only the\n"
               f"     gradient part is rescaled, not the environment simulation, so this "
               f"is a rough bound.")
-    if args.device != "cpu":
-        print(f"  !! The rates were measured on CPU. --device {args.device} was not, "
-              f"so the numbers below\n"
-              f"     do not apply -- run examples/pcvi/measure_throughput.py on this "
-              f"machine.")
+    if args.device == "cuda" and args.n_envs != 1200:
+        print(f"  !! The cuda rates were measured at --n-envs 1200; you asked for "
+              f"{args.n_envs}.\n"
+              f"     On the RTX 3090 the cost fell until 2400 and was flat after: "
+              f"200 -> 0.12 h/Mframe,\n"
+              f"     600 -> 0.07, 1200 -> 0.05, 2400+ -> 0.04 (adam).")
     for optimizer in args.optimizers:
         each = _estimate_hours(args, optimizer)
         remaining = sum(1 for name, _ in todo if name == optimizer)

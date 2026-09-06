@@ -175,7 +175,12 @@ def main():
     parser.add_argument("--iters", type=int, default=17,
                         help="collection rounds; 17 x 120000 = 2.04M frames")
     parser.add_argument("--frames-per-batch", type=int, default=120000)
-    parser.add_argument("--n-envs", type=int, default=200)
+    parser.add_argument("--n-envs", type=int, default=1200,
+                        help="parallel VMAS environments. 1200 makes "
+                             "frames_per_batch/n_envs = 100, which is simple_tag's "
+                             "max_steps, so each env completes exactly one full "
+                             "episode per collection round and no advantage has to "
+                             "be bootstrapped from a truncation")
     parser.add_argument("--minibatch-size", type=int, default=4096)
     parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--episodes", type=int, default=10)
