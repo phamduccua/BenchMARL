@@ -90,6 +90,7 @@ def _command(args, optimizer: str, seed: int, cell: pathlib.Path):
         "--minibatch-size", str(args.minibatch_size),
         "--epochs", str(args.epochs),
         "--episodes", str(args.episodes),
+        "--eval-every", str(args.eval_every),
         "--device", args.device,
         "--output-dir", str(cell),
     ]
@@ -202,6 +203,11 @@ def main():
     parser.add_argument("--minibatch-size", type=int, default=400)
     parser.add_argument("--epochs", type=int, default=45)
     parser.add_argument("--episodes", type=int, default=10)
+    parser.add_argument("--eval-every", type=int, default=10, metavar="ROUNDS",
+                        help="evaluate every ROUNDS collection rounds. run_ablation's "
+                             "own default is iters // 4, which gives four points "
+                             "however long the run is and cannot be plotted against "
+                             "frames, so the campaign asks for something denser.")
     parser.add_argument("--device", default="cpu",
                         help="cpu is FASTER than cuda on this project's GPU "
                              "(Quadro P1000, tiny MLPs); measure before changing it")

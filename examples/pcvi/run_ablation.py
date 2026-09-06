@@ -98,7 +98,12 @@ def build(args, optimizer_name: str, seed: int):
     config.on_policy_minibatch_size = args.minibatch_size
     config.on_policy_n_minibatch_iters = args.epochs
     config.evaluation = True
-    config.evaluation_interval = args.frames_per_batch * max(1, args.iters // 4)
+    # Every `eval_every` collection rounds. The default of iters // 4 gives FOUR
+    # evaluation points whatever the length of the run, which is enough to say
+    # "it ended higher than it started" and not enough to plot a learning curve
+    # of eval_win_rate or eval_nash_conv. Pass --eval-every to make it dense.
+    eval_every = args.eval_every or max(1, args.iters // 4)
+    config.evaluation_interval = args.frames_per_batch * eval_every
     config.evaluation_episodes = args.episodes
     config.render = False
     config.save_folder = str(_output_dir(args))
@@ -173,6 +178,13 @@ def main():
     parser.add_argument("--minibatch-size", type=int, default=400)
     parser.add_argument("--epochs", type=int, default=45)
     parser.add_argument("--episodes", type=int, default=10)
+    parser.add_argument("--eval-every", type=int, default=None,
+                        metavar="ROUNDS",
+                        help="evaluate every ROUNDS collection rounds. Default is "
+                             "iters // 4, i.e. four evaluation points however long "
+                             "the run is -- too coarse to plot eval_win_rate or "
+                             "eval_nash_conv against frames. Costs "
+                             "--episodes rollouts each time.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--predator-group", default="adversary")
     parser.add_argument("--loggers", nargs="*", default=["csv"])
