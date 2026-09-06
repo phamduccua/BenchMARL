@@ -86,8 +86,12 @@ def _command(args, optimizer: str, seed: int, cell: pathlib.Path):
     ]
     if args.half_epochs:
         command.append("--half-epochs")
-    for item in args.lambda0:
-        command += ["--lambda0", item]
+    if args.lambda0:
+        # One flag with every value: run_ablation declares --lambda0 as nargs="*",
+        # so repeating the flag REPLACES the list instead of extending it, and
+        # every branch but the last would silently lose its lambda_0.
+        command.append("--lambda0")
+        command += args.lambda0
     if args.optimizer_overrides:
         command.append("--optimizer-overrides")
         command += args.optimizer_overrides

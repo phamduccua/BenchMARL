@@ -12,10 +12,13 @@ to hand to anyone. This script rolls the whole thing into a single archive and
 adds two files that make it readable without unpacking every csv:
 
 ``manifest.csv``
-    one row per run: folder, algorithm, optimizer, task, model, number of
+    one row per run: folder, path, algorithm, optimizer, task, model, number of
     metrics, size, modification time. The optimizer column is why
     ``experiment.py`` puts the optimizer in the run name -- without it, an
-    IPPO+Adam run and an IPPO+PCVI run are indistinguishable on disk.
+    IPPO+Adam run and an IPPO+PCVI run are indistinguishable on disk. The
+    ``path`` column is what carries the **seed**, since it holds the
+    ``<optimizer>_seed<N>/`` cell folder that ``run_campaign.py`` writes; the
+    run name itself has no seed in it.
 ``summary.csv``
     one row per (run, metric) with the **first, last, min, max** value and the
     number of points. This is the table to open first: the last value of
@@ -46,8 +49,26 @@ CHECKPOINT_DIR = "checkpoints"
 
 
 def run_folders(output_dir: pathlib.Path, only):
-    """The per-run folders under ``output_dir``, optionally filtered by name."""
-    folders = sorted(p for p in output_dir.iterdir() if p.is_dir())
+    """The per-run folders under ``output_dir``, optionally filtered by name.
+
+    A run folder is the one holding ``config.pkl``, found at whatever depth it
+    sits. Looking only one level down would break on the two layouts that are
+    not flat:
+
+    * ``run_campaign.py`` puts each cell in ``<optimizer>_seed<N>/<run name>/``,
+    * hydra puts each run in ``outputs/<date>/<time>/<run name>/``,
+
+    and in both cases the one-level-down folder has no name to parse, so the
+    manifest would lose the optimizer column -- the column the run naming exists
+    for in the first place.
+    """
+    folders = sorted({p.parent for p in output_dir.rglob("config.pkl")})
+    if not folders:  # a run whose logger wrote nothing but scalars
+        folders = sorted(
+            {p.parent.parent for p in output_dir.rglob(f"{SCALAR_DIR}/*.csv")}
+        )
+    if not folders:  # nothing recognisable: fall back to the flat layout
+        folders = sorted(p for p in output_dir.iterdir() if p.is_dir())
     if only:
         folders = [p for p in folders if any(token in p.name for token in only)]
     return folders
@@ -92,7 +113,7 @@ def read_series(path: pathlib.Path):
     return values
 
 
-def build_summary(folders):
+def build_summary(folders, output_dir):
     rows = []
     for folder in folders:
         parsed = parse_name(folder.name)
@@ -103,6 +124,7 @@ def build_summary(folders):
             rows.append(
                 {
                     "run": folder.name,
+                    "path": str(folder.relative_to(output_dir)),
                     "algorithm": parsed["algorithm"],
                     "optimizer": parsed["optimizer"],
                     "task": parsed["task"],
@@ -117,7 +139,7 @@ def build_summary(folders):
     return rows
 
 
-def build_manifest(folders):
+def build_manifest(folders, output_dir):
     rows = []
     for folder in folders:
         parsed = parse_name(folder.name)
@@ -126,6 +148,7 @@ def build_manifest(folders):
         rows.append(
             {
                 "run": folder.name,
+                "path": str(folder.relative_to(output_dir)),
                 "algorithm": parsed["algorithm"],
                 "optimizer": parsed["optimizer"],
                 "task": parsed["task"],
@@ -182,8 +205,8 @@ def main():
             f"({dest}). Pass a --dest outside {output_dir}."
         )
 
-    manifest = build_manifest(folders)
-    summary = build_summary(folders)
+    manifest = build_manifest(folders, output_dir)
+    summary = build_summary(folders, output_dir)
 
     written = skipped = 0
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
