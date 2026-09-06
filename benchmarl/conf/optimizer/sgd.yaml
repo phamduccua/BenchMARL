@@ -1,0 +1,14 @@
+defaults:
+  - sgd_config
+  - _self_
+
+# Control branch for pc / pcvi / extragradient, which are plain gradient methods
+# with no per-coordinate normalisation. Without this branch, "pcvi loses to adam"
+# cannot be told apart from "there is no preconditioner".
+
+# null = read experiment.lr. Note that the tuned 5e-5 was tuned FOR Adam; plain
+# SGD usually wants a much larger lr, so sweep it.
+lr: null
+# 0.0 keeps this a pure gradient method, which is the point of the control.
+momentum: 0.0
+extra_kwargs: null

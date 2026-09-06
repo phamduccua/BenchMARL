@@ -1,0 +1,9 @@
+defaults:
+  - adam_config
+  - _self_
+
+# All null: read lr / adam_eps / adam_extra_kwargs from the experiment config.
+# This reproduces exactly the behaviour before optimizers became configurable.
+lr: null
+eps: null
+extra_kwargs: null

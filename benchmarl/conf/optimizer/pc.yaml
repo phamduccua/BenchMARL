@@ -1,0 +1,42 @@
+defaults:
+  - pc_config
+  - _self_
+
+# Algorithm 1 of https://doi.org/10.1002/mma.11132 with a FIXED lambda: only the
+# projection-contraction part (Steps 4-6). Step 3's update of lambda is off.
+
+# lambda is CONSTANT, so this is the most important hyperparameter and it MUST be
+# swept -- there is no mechanism left to find a step size on its own.
+#
+# The convergence proof needs
+#     lambda_{k+1} ||F(u_k) - F(v_k)|| <= p ||u_k - v_k||
+# which Step 3 used to guarantee by construction. With lambda fixed it holds iff
+#     lambda <= p / L
+# so p/L is a BOUNDARY, not a safe value. Measured on IPPO + vmas/balance + MLP,
+# p/L ~ 2e-3, so the default below sits at half of it.
+#
+# Note also: for any lambda_0 <= p/L, PCVI's `min` always picks lambda_k, so PCVI
+# never moves lambda either and `pc` and `pcvi` are then bit-identical. Comparing
+# the two at a single lambda_0 is therefore meaningless -- sweep it.
+lambda_0: 0.001
+# beta in (0, 2)
+beta: 1.95
+# gamma > 0. Has no numerical effect (when d_k = 0 the iterate does not move);
+# kept for fidelity to the paper.
+gamma: 1.0
+
+# --- Below: NOT in the paper. Defaults are the faithful ones (no safeguard).
+# Clamps for beta_k. null = no clamp = faithful.
+# With lambda fixed, beta_k >= min(gamma, beta/2) holds from step 0 (not just
+# asymptotically as in pcvi) PROVIDED lambda <= p/L. Outside that range nothing
+# rescues it, so watch pcvi_beta_clamped_* in the logs.
+beta_k_min: null
+beta_k_max: null
+# Threshold below which ||F(u_k) - F(v_k)|| counts as zero
+eps_denominator: 1.0e-12
+# Use the identity d_k = lambda_k F(v_k) instead of formula (3.1). Numerically
+# equivalent, and better conditioned in float32.
+use_identity_dk: False
+# Meaningless here (lambda never changes); kept so the three variants have the
+# same shape of config.
+reset_lambda_per_batch: False

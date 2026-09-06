@@ -1,0 +1,35 @@
+defaults:
+  - lookahead_config
+  - _self_
+
+# Lookahead (Zhang et al., NeurIPS 2019): k steps forward, 1 step back.
+#     phi <- phi + alpha (theta - phi)   every k inner steps,   theta <- phi
+#
+# NOTE: this is NOT the look-ahead of extragradient. Same word, different
+# mechanism -- extragradient looks ahead ONE GRADIENT step and uses the gradient
+# there; Lookahead looks ahead k OPTIMIZER steps and interpolates towards them.
+
+# Inner optimizer: any name in the registry except "lookahead".
+#   adam  -> the Zhang et al. baseline, 1 gradient/step, so directly comparable
+#            in cost to plain IPPO
+#   pcvi  -> a new combination: Lookahead reduces gradient variance, which is
+#            exactly what makes pcvi's lambda collapse (see
+#            KE_HOACH_IMPLEMENT_IPPO.md section 6.2)
+inner: "adam"
+# Fields to override on the inner config after loading its yaml, e.g.
+#   inner_overrides: {lambda_0: 0.005}
+inner_overrides: {}
+
+# Sync period, in inner steps. Zhang et al. use 5 or 10.
+# BenchMARL runs n_optimizer_steps * n_minibatches updates per collection round
+# (675 by default) and then collects with the live policy, so prefer a k that
+# divides it -- 5, 9, 15, 27, 45 -- or the data is collected with fast weights
+# mid-cycle. A warning is raised otherwise.
+k: 5
+# Interpolation coefficient, in (0, 1]. alpha = 1 makes Lookahead a no-op.
+alpha: 0.5
+
+# NOT in the paper: force a sync at the end of every collection round, so data is
+# always collected with the slow weights. A partial cycle then gets the same
+# alpha as a full one.
+sync_at_round_end: False

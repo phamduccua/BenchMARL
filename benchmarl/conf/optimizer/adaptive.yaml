@@ -1,0 +1,52 @@
+defaults:
+  - adaptive_config
+  - _self_
+
+# Adam driven by Step 3 of Algorithm 1 (https://doi.org/10.1002/mma.11132):
+#     theta_{k+1} = theta_k + Adam_{lr = lr_scale * lambda_k}(grad L_CLIP(theta_k))
+# Steps 4-6 (d_k, beta_k) are NOT used; v_k only estimates lambda.
+# NOTE: `p` is what the paper calls `theta`; renamed to avoid the clash with the
+# network parameters.
+
+# lambda_0 must be ABOVE p / L_local or the adaptation never fires and this is
+# just IPPO at twice the cost. Measured on IPPO + vmas/balance + MLP,
+# p / L ~ 2e-3, so anything from 1e-2 up engages the mechanism.
+lambda_0: 0.01
+# p in (0, 1)
+p: 0.5
+eps_denominator: 1.0e-12
+
+# --- Below: NOT in the paper. Defaults are the faithful ones.
+# lr = lr_scale * lambda_k. 1.0 is faithful, but read this first:
+# lambda ~ p/L is a step for the RAW gradient, while Adam steps by
+# lr * m/sqrt(v), whose size is ~1 per coordinate whatever the gradient scale.
+# The two are not in the same units. To keep the SHAPE of the schedule Step 3
+# produces but on a scale Adam can use, run
+#   python examples/pcvi/measure_lr_scale.py
+# which reports lambda_settle per loss and the lr_scale that lands on a target lr.
+#
+# Measured (IPPO + vmas/balance + MLP, 120 steps, 1 seed -- a probe, not an
+# experiment), starting from lambda_0 = 1e-2:
+#   loss_objective (actor) : lambda -> 9.7e-5   => lr_scale 0.52 for a 5e-5 lr
+#   loss_critic            : lambda -> 1.9e-3   => lr_scale 0.026
+# Two things to note. First, the actor's lambda self-corrected to within ~2x of
+# the hand-tuned Adam lr, so lr_scale=1.0 may already be usable there. Second,
+# actor and critic settle 20x apart: Step 3 gives them DIFFERENT learning rates,
+# which plain BenchMARL cannot do (one `lr` for both). A single lr_scale keeps
+# that ratio and only fixes the overall scale, which is what you want.
+lr_scale: 1.0
+# Floor for lambda_k. 0.0 = faithful. Setting it equal to lambda_0 freezes the
+# schedule, which turns this optimizer into plain Adam at lr = lr_scale*lambda_0.
+lambda_min: 0.0
+# Where the Lipschitz estimate comes from:
+#   "probe"    - from u_k and the look-ahead v_k. Faithful, TWO gradients/step.
+#   "iterates" - from theta_k and theta_{k-1}. ONE gradient/step, i.e. the same
+#                cost as plain Adam, so the comparison against Adam is exactly
+#                fair. NOT in the paper.
+lipschitz_from: "probe"
+# Reset lambda_k to lambda_0 at the start of every collection round
+reset_lambda_per_batch: False
+
+# Adam parameters. null = read from the experiment config.
+eps: null
+extra_kwargs: null

@@ -1,0 +1,7 @@
+defaults:
+  - matrixgame_rock_paper_scissors_config
+  - _self_
+
+# Rounds per episode. Each round is independent (the game is stateless), so this
+# only controls how many samples an episode yields.
+max_steps: 32

@@ -1,0 +1,19 @@
+defaults:
+  - extragradient_config
+  - _self_
+
+# Korpelevich (1976): Algorithm 1 with beta_k = 1 and a fixed lambda.
+#     v_k       = theta_k - lambda F(theta_k)
+#     theta_k+1 = theta_k - lambda F(v_k)
+
+# lambda is CONSTANT and is the only real hyperparameter, so it MUST be swept.
+# Stability limit measured on the paper's Example 5.1 (L = 46.43 analytically):
+#     lambda*L = 0.900 -> converges     0.990 -> breaks down     1.125 -> blows up
+# i.e. exactly the classical lambda < 1/L, with nothing to recover past it.
+lambda_0: 0.001
+eps_denominator: 1.0e-12
+# True: build d_k as lambda*F(v_k) directly rather than through formula (3.1).
+# Algebraically identical, but with beta_k = 1 the vector d_k IS the step, so the
+# catastrophic cancellation of (3.1) in float32 would go straight into the
+# iterate. Hence True here, unlike pcvi/pc where the default is False.
+use_identity_dk: True

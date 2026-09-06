@@ -1,0 +1,16 @@
+defaults:
+  - adaptive_extragradient_config
+  - _self_
+
+# Extragradient (beta_k = 1) with Step 3's adaptive lambda. The fourth cell of
+# the grid {fixed, adaptive} lambda x {Step 5, beta_k = 1}, alongside pc, pcvi
+# and extragradient.
+
+# lambda_0 must be ABOVE p / L_local for the adaptation to fire at all; below it
+# the `min` always picks lambda_k and this reduces to plain extragradient.
+lambda_0: 0.01
+p: 0.5
+lambda_min: 0.0
+eps_denominator: 1.0e-12
+use_identity_dk: True
+reset_lambda_per_batch: False
