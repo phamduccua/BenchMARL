@@ -309,6 +309,9 @@ def config(experiment_config):
     experiment_config.evaluation = True
     experiment_config.evaluation_interval = 200
     experiment_config.evaluation_episodes = 4
+    # A mixed Nash cannot be measured off argmax actions; see
+    # test_nash_callback_refuses_deterministic_evaluation.
+    experiment_config.evaluation_deterministic_actions = False
     experiment_config.render = False
     experiment_config.checkpoint_interval = 0
     experiment_config.loggers = []
@@ -331,6 +334,39 @@ def test_matrix_game_trains_with_the_nash_callback(config, task):
     )
     assert set(experiment.group_map) == set(PLAYERS)
     experiment.run()
+
+
+def test_nash_callback_refuses_deterministic_evaluation(config):
+    """The failure this guards against is silent and total.
+
+    With BenchMARL's default ``evaluation_deterministic_actions=True`` the
+    evaluation policy takes the argmax action, so the empirical distribution the
+    callback measures is one-hot however well the policy has learnt. Every mixed
+    equilibrium then looks maximally far away: on rock-paper-scissors dist_nash
+    reads exactly 2/3 -- its largest possible value -- and nash_conv 2.0, flat for
+    the entire run, which is easy to mistake for "it has not converged yet".
+    """
+    config.evaluation_deterministic_actions = True
+    with pytest.raises(ValueError, match="evaluation_deterministic_actions"):
+        Experiment(
+            task=MatrixGameTask.ROCK_PAPER_SCISSORS.get_from_yaml(),
+            algorithm_config=IppoConfig.get_from_yaml(),
+            model_config=MlpConfig.get_from_yaml(),
+            critic_model_config=MlpConfig.get_from_yaml(),
+            seed=0,
+            config=config,
+            callbacks=[NashDistanceCallback()],
+        )
+
+
+def test_deterministic_policy_is_the_worst_possible_dist_nash():
+    """2/3 is not a coincidence: it is the maximum for a 3-action uniform Nash."""
+    callback = NashDistanceCallback(game="rock_paper_scissors")
+    nash = torch.full((3,), 1.0 / 3.0)
+    one_hot = torch.tensor([1.0, 0.0, 0.0])
+    distance = 0.5 * torch.abs(one_hot - nash).sum().item()
+    assert distance == pytest.approx(2.0 / 3.0)
+    assert callback.game == "rock_paper_scissors"
 
 
 def test_simple_tag_trains_with_the_win_rate_callback(config):

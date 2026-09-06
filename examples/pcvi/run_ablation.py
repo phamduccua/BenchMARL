@@ -128,6 +128,11 @@ def build(args, optimizer_name: str, seed: int):
 
     callbacks = []
     if args.task.startswith("matrixgame/"):
+        # A mixed Nash equilibrium cannot be reached by argmax actions: with
+        # BenchMARL's default deterministic evaluation the measured policy is
+        # one-hot, and dist_nash / nash_conv sit at their maximum for the whole
+        # run whatever the policy learns.
+        config.evaluation_deterministic_actions = False
         callbacks.append(NashDistanceCallback())
     elif args.task in ("vmas/simple_tag", "vmas/simple_world_comm"):
         callbacks.append(WinRateCallback(predator_group=args.predator_group))

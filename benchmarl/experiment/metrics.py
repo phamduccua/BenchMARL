@@ -84,6 +84,20 @@ class NashDistanceCallback(Callback):
                 f"NashDistanceCallback does not know the game {self.game!r}. "
                 f"Available: {sorted(PAYOFFS)}"
             )
+        # getattr: the unit tests drive this callback with a stub config that has
+        # no such field, and absent means "not deterministic".
+        if getattr(self.experiment.config, "evaluation_deterministic_actions", False):
+            raise ValueError(
+                "NashDistanceCallback needs stochastic evaluation, but "
+                "experiment.evaluation_deterministic_actions is True (BenchMARL's "
+                "default). With it on, the evaluation policy takes the argmax "
+                "action, so the empirical distribution this callback measures is "
+                "one-hot no matter what the policy has learnt. Every mixed Nash "
+                "equilibrium then looks maximally far away: on rock-paper-scissors "
+                "dist_nash sits at exactly 2/3 -- its largest possible value -- and "
+                "nash_conv at 2.0, for the whole run. Set "
+                "experiment.evaluation_deterministic_actions=False."
+            )
         device = self.experiment.config.train_device
         self.players = list(PLAYERS)
         self.payoff = torch.tensor(PAYOFFS[self.game], dtype=torch.float32).to(device)
