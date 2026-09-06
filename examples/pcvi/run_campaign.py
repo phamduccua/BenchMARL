@@ -136,6 +136,7 @@ def _run_cell(args, optimizer: str, seed: int) -> dict:
         # than running the cells one at a time.
         OMP_NUM_THREADS=threads,
         MKL_NUM_THREADS=threads,
+        OPENBLAS_NUM_THREADS=threads,
     )
     command = _command(args, optimizer, seed, cell)
     started = time.time()
@@ -243,10 +244,17 @@ def main():
     parser.add_argument("--output-dir", default="outputs/campaign")
     parser.add_argument("--workers", type=int, default=1,
                         help="cells to run at once")
-    parser.add_argument("--threads-per-worker", type=int, default=3)
+    parser.add_argument("--threads-per-worker", type=int, default=None,
+                        help="CPU threads per cell. Default 1 on cuda (the "
+                             "compute is on the GPU, so extra threads only "
+                             "contend) and 3 on cpu.")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the grid and the estimated cost, run nothing")
     args = parser.parse_args()
+    if args.threads_per_worker is None:
+        # On a GPU the work is on the device; one torch thread per cell is
+        # enough to feed it, and N cells x 128 threads only thrash the box.
+        args.threads_per_worker = 1 if args.device != "cpu" else 3
 
     try:
         sys.stdout.reconfigure(encoding="utf-8")
