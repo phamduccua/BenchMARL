@@ -112,15 +112,26 @@ def _command(args, optimizer: str, seed: int, cell: pathlib.Path):
     ]
     if args.half_epochs:
         command.append("--half-epochs")
+    if args.init_bias:
+        command += ["--init-bias", str(args.init_bias)]
     if args.lambda0:
         # One flag with every value: run_ablation declares --lambda0 as nargs="*",
         # so repeating the flag REPLACES the list instead of extending it, and
         # every branch but the last would silently lose its lambda_0.
         command.append("--lambda0")
         command += args.lambda0
+    if args.algorithm_overrides:
+        command.append("--algorithm-overrides")
+        command += args.algorithm_overrides
     if args.optimizer_overrides:
         command.append("--optimizer-overrides")
         command += args.optimizer_overrides
+    if args.experiment_overrides:
+        command.append("--experiment-overrides")
+        command += args.experiment_overrides
+    if args.task_overrides:
+        command.append("--task-overrides")
+        command += args.task_overrides
     return command
 
 
@@ -238,7 +249,21 @@ def main():
                         help="cpu is FASTER than cuda on this project's GPU "
                              "(Quadro P1000, tiny MLPs); measure before changing it")
     parser.add_argument("--half-epochs", action="store_true")
+    parser.add_argument("--experiment-overrides", nargs="*", default=[],
+                        metavar="FIELD=VALUE",
+                        help="passed through: fields of ExperimentConfig "
+                             "(gamma, lmbda, lr, ...)")
+    parser.add_argument("--task-overrides", nargs="*", default=[],
+                        metavar="KEY=VALUE",
+                        help="passed through: keys of the task yaml (max_steps)")
+    parser.add_argument("--init-bias", type=float, default=0.0, metavar="SIGMA",
+                        help="passed through to run_ablation.py: start the policy "
+                             "N(0, SIGMA) away from uniform. On a matrix game the "
+                             "default init is already ~Nash. NOT in the paper.")
     parser.add_argument("--lambda0", nargs="*", default=[], metavar="NAME=VALUE")
+    parser.add_argument("--algorithm-overrides", nargs="*", default=[],
+                        metavar="FIELD=VALUE",
+                        help="passed through to run_ablation, e.g. entropy_coef=0.01")
     parser.add_argument("--optimizer-overrides", nargs="*", default=[],
                         metavar="FIELD=VALUE")
     parser.add_argument("--output-dir", default="outputs/campaign")

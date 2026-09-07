@@ -12,8 +12,23 @@ in a way nothing later complains about, so this script makes the rule explicit
 and applies it the same way every time.
 
 **The rule.** A row is *usable* when the run did not diverge, ``lambda``
-actually moved (``lambda_end / lambda_0 < 1 - tol``), and ``beta_k`` went
-negative on no more than ``--max-beta-neg`` percent of the steps.
+**moved but did not collapse** (``COLLAPSE_TOL < lambda_end/lambda_0 < 1 -
+MOVED_TOL``), and the ``beta_k`` the step *actually used* went negative on no
+more than ``--max-beta-neg`` percent of the steps.
+
+Two columns are printed for that last one and they mean different things.
+``b<0 dung`` is post-``beta_fallback`` -- what the step really did, and the one
+the filter uses. ``b<0 tho`` is before the fallback: it measures how often
+inverse strong monotonicity is violated, which is a result to report, not a
+reason to reject a ``lambda_0``. On ``pcvi_plus`` (``beta_fallback: 1.0``) the
+raw column reached 37.8% on rock_paper_scissors while the effective column was
+0%: every one of those steps was replaced by a plain extragradient step.
+
+The collapse check exists because "lambda moved" is true both when Step 3 finds
+``p/L`` and when noise drives ``lambda`` to zero. Measured on
+rock_paper_scissors, ``pcvi`` reported a settling point of **2.9e-09** -- nine
+orders down, i.e. the branch had stopped moving entirely. That is not a knee,
+and averaging it into one would hand back a meaningless ``lambda_0``.
 
 Among the usable rows the default choice is the **smallest** ``lambda_0``, i.e.
 the one sitting just above the knee. Note that "the largest ``lambda_0`` at
@@ -87,21 +102,35 @@ DERIVED = {
     "adaptive_plus": ("pcvi", 1.0),
 }
 
-MOVED_TOL = 0.02  # lambda_end/lambda_0 must be below 1 - this to count as moved
+MOVED_TOL = 0.02      # lambda_end/lambda_0 below 1 - this counts as "moved"
+COLLAPSE_TOL = 1e-4   # ...but below THIS it has collapsed, not settled
 
 
-def beta_neg(row):
-    """How often beta_k went negative, BEFORE beta_fallback masked it.
+def beta_neg_effective(row):
+    """How often the step actually used a negative beta_k.
 
-    A branch with ``beta_fallback`` set never reports a negative ``pcvi_beta_k``
-    -- the fallback has already replaced it -- so reading the plain column would
-    say 0% on exactly the branches built to hide the problem. Fall back to the
-    masked column only for older sweep tables that lack the raw one.
+    This is the one that decides whether a row is usable: a negative beta_k
+    means Step 6 moved AGAINST d_k. On a branch with ``beta_fallback`` set the
+    value was replaced by 1.0 before the step, so it never happened.
+    """
+    return row.get("beta_negative_pct", float("nan"))
+
+
+def beta_neg_raw(row):
+    """How often beta_k would have been negative, before ``beta_fallback``.
+
+    Purely diagnostic: it measures how often inverse strong monotonicity is
+    violated, which is a result worth reporting, NOT a reason to reject a
+    lambda_0. Falls back to the effective column on older sweep tables.
     """
     raw = row.get("beta_raw_negative_pct", float("nan"))
-    if raw == raw:
-        return raw
-    return row.get("beta_negative_pct", float("nan"))
+    return raw if raw == raw else beta_neg_effective(row)
+
+
+def fallback_fired(row):
+    """post-fallback 0% while raw > 0% means beta_fallback did the masking."""
+    eff, raw = beta_neg_effective(row), beta_neg_raw(row)
+    return eff == eff and raw == raw and raw > 0.0 and eff == 0.0
 
 
 def load(patterns):
@@ -137,7 +166,12 @@ def usable(row, max_beta_neg):
         return False, "khong huu han"
     if ratio > 1.0 - MOVED_TOL:
         return False, f"lambda dung yen (end/0={ratio:.3f})"
-    neg = beta_neg(row)
+    if ratio < COLLAPSE_TOL:
+        # lambda settling at p/L is the point of Step 3; lambda falling four
+        # orders of magnitude is the collapse of CONTEXT_DU_AN.md 5.12 -- the
+        # branch has stopped moving and lambda_end is not a knee.
+        return False, f"lambda SUP (end/0={ratio:.1e}, end={row['lambda_end']:.2e})"
+    neg = beta_neg_effective(row)
     if neg == neg and neg > max_beta_neg:
         return False, f"beta_k am {neg:.1f}% > {max_beta_neg:g}%"
     return True, f"end/0={ratio:.3f}"
@@ -210,8 +244,8 @@ def main():
     print(f"Quy tac chon: {mode}; loai dong co beta_k am > {args.max_beta_neg:g}%")
     print()
     print(f"{'nhanh':<16}{'lambda_0 chon':>15}{'dau goi p/L':>14}"
-          f"{'dung duoc':>11}{'beta<0':>9}  lua chon con lai / ghi chu")
-    print("-" * 96)
+          f"{'dung duoc':>11}{'b<0 dung':>10}{'b<0 tho':>9}  lua chon con lai / ghi chu")
+    print("-" * 104)
 
     picks, knees = {}, {}
     for name in sorted(by_optimizer):
@@ -220,21 +254,24 @@ def main():
             reasons = {usable(r, args.max_beta_neg)[1].split("(")[0].strip()
                        for r in by_optimizer[name]}
             print(f"{name:<16}{'KHONG CO':>15}{'-':>14}"
-                  f"{'0/' + str(len(by_optimizer[name])):>11}{'-':>9}  "
+                  f"{'0/' + str(len(by_optimizer[name])):>11}{'-':>10}{'-':>9}  "
                   f"!! {', '.join(sorted(reasons))}")
             continue
         row, knee = result["row"], result["knee"]
         picks[name] = row["lambda_0"]
         knees[name] = knee
-        neg = beta_neg(row)
-        neg_txt = "-" if neg != neg else f"{neg:.1f}%"
+        eff, raw = beta_neg_effective(row), beta_neg_raw(row)
+        eff_txt = "-" if eff != eff else f"{eff:.1f}%"
+        raw_txt = "-" if raw != raw else f"{raw:.1f}%"
         other = result["other"]["lambda_0"]
         note = "" if other == row["lambda_0"] else f"{other:g}"
+        if fallback_fired(row):
+            note += "  [beta_fallback da che]"
         if result["n_usable"] == 1:
             note += "  (chi 1 dong dung duoc -> quet them diem)"
         print(f"{name:<16}{row['lambda_0']:>15.3g}{knee:>14.3g}"
               f"{str(result['n_usable']) + '/' + str(result['n_total']):>11}"
-              f"{neg_txt:>9}  {note}")
+              f"{eff_txt:>10}{raw_txt:>9}  {note}")
 
     if not args.no_derive:
         derived = {}
@@ -258,6 +295,10 @@ def main():
     print()
     fragment = " ".join(f"{k}={v:g}" for k, v in sorted(picks.items()))
     print(f"    --lambda0 {fragment}")
+    print()
+    print("...hoac dat bien mot lan roi dung lai cho moi lenh cua task nay:")
+    print()
+    print(f'    LAMBDA0="{fragment}"')
     print()
     print("Kiem tra sau khi chay chien dich: cot `pcvi_lambda` trong csv PHAI co "
           "lai.\nPhang li dung bang lambda_0 = lua chon nay sai, quet lai dai cao hon.")

@@ -31,11 +31,14 @@ Read the caveats in HUONG_DAN_CHAY.md section 5.2 before drawing conclusions:
 """
 
 import argparse
+from dataclasses import fields
 import pathlib
 import statistics
 import sys
 import time
 import warnings
+
+import torch
 
 from benchmarl.algorithms import algorithm_config_registry
 from benchmarl.environments import task_config_registry
@@ -66,6 +69,29 @@ def _cast(value: str, current):
         return value
 
 
+def _apply_algorithm_overrides(algorithm_config, overrides):
+    """``--algorithm-overrides entropy_coef=0.01 clip_epsilon=0.2``.
+
+    The field that matters most here is ``entropy_coef``: BenchMARL ships it at
+    0.0, and on a game whose equilibrium is a fully mixed strategy that lets the
+    policy collapse to a pure one, which is the maximally exploitable point.
+    """
+    for override in overrides:
+        if "=" not in override:
+            raise ValueError(
+                f"--algorithm-overrides takes FIELD=VALUE, got {override!r}"
+            )
+        field, _, raw = override.partition("=")
+        if not hasattr(algorithm_config, field):
+            available = ", ".join(sorted(f.name for f in fields(algorithm_config)))
+            raise ValueError(
+                f"{type(algorithm_config).__name__} has no field {field!r}. "
+                f"Available: {available}"
+            )
+        setattr(algorithm_config, field, _cast(raw, getattr(algorithm_config, field)))
+    return algorithm_config
+
+
 def _apply_overrides(optimizer_config, overrides, optimizer_name):
     """``--optimizer-overrides beta=1.5 lookahead.inner=pcvi``.
 
@@ -86,6 +112,70 @@ def _apply_overrides(optimizer_config, overrides, optimizer_name):
                 )
             continue  # unscoped: this branch simply does not have the knob
         setattr(optimizer_config, field, _cast(value, getattr(optimizer_config, field)))
+
+
+def _apply_experiment_overrides(config, overrides):
+    """``FIELD=VALUE`` pairs applied to the ExperimentConfig.
+
+    gamma, lmbda and lr live on ExperimentConfig, not on the algorithm or the
+    optimizer, so before this flag existed they could only be changed by editing
+    base_experiment.yaml. gamma in particular is load-bearing: the matrix game is
+    stateless, so the correct discount is 0 and the default 0.99 mixes 31 rounds
+    of independent rewards into every advantage.
+    """
+    for pair in overrides:
+        field, _, value = pair.partition("=")
+        if not hasattr(config, field):
+            raise SystemExit(
+                f"ExperimentConfig has no field {field!r}. "
+                f"Available: {sorted(f.name for f in fields(config))}"
+            )
+        setattr(config, field, _cast(value, getattr(config, field)))
+
+
+def _apply_task_overrides(task, overrides):
+    """``KEY=VALUE`` pairs applied to the task config dict (max_steps, ...)."""
+    for pair in overrides:
+        key, _, value = pair.partition("=")
+        if key not in task.config:
+            raise SystemExit(
+                f"Task {type(task).__name__} has no config key {key!r}. "
+                f"Available: {sorted(task.config)}"
+            )
+        task.config[key] = _cast(value, task.config[key])
+
+
+def _perturb_initial_policy(experiment, sigma: float, seed: int) -> dict:
+    """Moves the starting policy away from the uniform distribution.
+
+    On a matrix game the equilibrium is the uniform mixed strategy, and a freshly
+    initialised softmax head with small weights IS approximately uniform: measured
+    on rock_paper_scissors, ``nash_conv`` starts at 0.17--0.32 against a ceiling of
+    2.0. The run therefore begins next to the answer, and an optimizer that does
+    nothing at all scores better than one that learns -- which is not the question
+    being asked. Adding N(0, sigma) to the bias of each policy's last linear layer
+    starts every branch at the same measured distance from Nash instead.
+
+    Not part of the paper or of BenchMARL: report the sigma used, and report the
+    round-0 ``nash_conv`` it produces, in anything written up from these runs.
+    """
+    generator = torch.Generator(device="cpu").manual_seed(seed + 90210)
+    moved = {}
+    for group, policy in experiment.group_policies.items():
+        layers = [m for m in policy.modules() if isinstance(m, torch.nn.Linear)]
+        if not layers or layers[-1].bias is None:
+            raise SystemExit(
+                f"--init-bias: no final Linear with a bias in the policy of group "
+                f"{group!r}; the perturbation would silently do nothing."
+            )
+        bias = layers[-1].bias
+        noise = torch.randn(
+            bias.shape, generator=generator, dtype=bias.dtype
+        ).to(bias.device)
+        with torch.no_grad():
+            bias.add_(noise * sigma)
+        moved[group] = tuple(bias.shape)
+    return moved
 
 
 def build(args, optimizer_name: str, seed: int):
@@ -110,6 +200,7 @@ def build(args, optimizer_name: str, seed: int):
     config.loggers = list(args.loggers)
     config.create_json = False
     config.checkpoint_interval = 0
+    _apply_experiment_overrides(config, args.experiment_overrides)
 
     optimizer_config = optimizer_config_registry[optimizer_name].get_from_yaml()
     # Overrides FIRST: `lookahead.inner=pcvi` changes whether this branch needs a
@@ -137,9 +228,15 @@ def build(args, optimizer_name: str, seed: int):
     elif args.task in ("vmas/simple_tag", "vmas/simple_world_comm"):
         callbacks.append(WinRateCallback(predator_group=args.predator_group))
 
+    task = task_config_registry[args.task].get_from_yaml()
+    _apply_task_overrides(task, args.task_overrides)
+
     experiment = Experiment(
-        task=task_config_registry[args.task].get_from_yaml(),
-        algorithm_config=algorithm_config_registry[args.algorithm].get_from_yaml(),
+        task=task,
+        algorithm_config=_apply_algorithm_overrides(
+            algorithm_config_registry[args.algorithm].get_from_yaml(),
+            args.algorithm_overrides,
+        ),
         model_config=MlpConfig.get_from_yaml(),
         critic_model_config=MlpConfig.get_from_yaml(),
         optimizer_config=optimizer_config,
@@ -147,6 +244,12 @@ def build(args, optimizer_name: str, seed: int):
         config=config,
         callbacks=callbacks,
     )
+    if args.init_bias:
+        moved = _perturb_initial_policy(experiment, args.init_bias, seed)
+        print(
+            f"  init-bias sigma={args.init_bias} applied to "
+            + ", ".join(f"{g}{tuple(shape)}" for g, shape in moved.items())
+        )
     return experiment, two_gradient
 
 
@@ -219,12 +322,32 @@ def main():
     parser.add_argument("--loggers", nargs="*", default=["csv"])
     parser.add_argument("--output-dir", default="outputs",
                         help="all runs land in this folder, one subfolder each")
+    parser.add_argument("--experiment-overrides", nargs="*", default=[],
+                        metavar="FIELD=VALUE",
+                        help="fields of ExperimentConfig: gamma, lmbda, lr, ... "
+                             "The matrix game is stateless, so gamma=0 is the "
+                             "correct discount there, not the default 0.99.")
+    parser.add_argument("--task-overrides", nargs="*", default=[],
+                        metavar="KEY=VALUE",
+                        help="keys of the task yaml, e.g. max_steps=200")
+    parser.add_argument("--init-bias", type=float, default=0.0, metavar="SIGMA",
+                        help="add N(0, SIGMA) to the bias of each policy's last "
+                             "linear layer before training. On a matrix game the "
+                             "default init is already ~uniform = ~Nash, so a "
+                             "branch that does not move wins; use e.g. 2.0 to "
+                             "start far from the equilibrium. NOT in the paper.")
     parser.add_argument("--half-epochs", action="store_true",
                         help="halve the epochs of two-gradient optimizers, so every "
                              "branch spends the same number of gradient evaluations")
     parser.add_argument("--lambda0", nargs="*", default=[],
                         metavar="NAME=VALUE",
                         help="per-optimizer lambda_0, e.g. pcvi=0.01 pc=0.001")
+    parser.add_argument("--algorithm-overrides", nargs="*", default=[],
+                        metavar="FIELD=VALUE",
+                        help="algorithm config fields, e.g. entropy_coef=0.01. "
+                             "BenchMARL ships entropy_coef=0.0, which on a game "
+                             "with a fully mixed Nash lets the policy collapse "
+                             "to a pure strategy")
     parser.add_argument("--optimizer-overrides", nargs="*", default=[],
                         metavar="FIELD=VALUE",
                         help="optimizer config fields. FIELD=VALUE goes to every branch "
