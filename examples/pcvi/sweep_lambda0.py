@@ -30,6 +30,7 @@ Usage::
 """
 
 import argparse
+import csv
 import pathlib
 import warnings
 
@@ -42,19 +43,33 @@ from benchmarl.models.mlp import MlpConfig
 from benchmarl.optimizers import (
     AdaptiveConfig,
     AdaptiveExtragradientConfig,
+    AdaptivePlusConfig,
     ExtragradientConfig,
     PcConfig,
+    PcPlusConfig,
     PcviConfig,
+    PcviPlusConfig,
 )
 
 # The 2x2 grid: {fixed, adaptive} lambda x {Step 5 contraction, beta_k = 1},
 # plus `adaptive`, which has a lambda_0 of its own and the same failure mode.
+#
+# The `*_plus` branches are here because their lambda_0 CANNOT be carried over
+# from the branch they extend: `pcvi_plus` and `pc_plus` set ``precond=true``,
+# which runs Steps 3-6 in Adam's metric. Adam normalises every coordinate to the
+# same scale, so the Lipschitz constant seen in that metric is ~1 and the knee
+# sits at ``p / L_P ~ 0.5`` instead of ``p / L ~ 5e-3`` -- two orders of
+# magnitude away. Their shipped yaml defaults (0.01 and 0.001) are BELOW that
+# knee, i.e. inert, which is precisely what this sweep exists to catch.
 OPTIMIZERS = {
     "extragradient": ExtragradientConfig,
     "adaptive_extragradient": AdaptiveExtragradientConfig,
     "pc": PcConfig,
     "pcvi": PcviConfig,
     "adaptive": AdaptiveConfig,
+    "pc_plus": PcPlusConfig,
+    "pcvi_plus": PcviPlusConfig,
+    "adaptive_plus": AdaptivePlusConfig,
 }
 
 
@@ -105,7 +120,7 @@ def run_one(optimizer_name, lambda_0, seed, args):
     group = args.group or next(iter(experiment.group_map))
     optimizer = experiment.optimizers[group]["loss_objective"]
 
-    betas, corrs = [], []
+    betas, betas_raw, corrs = [], [], []
     original_apply = optimizer.apply
 
     def spy_apply(*a, **kw):
@@ -115,6 +130,12 @@ def run_one(optimizer_name, lambda_0, seed, args):
         # assumed to be there.
         if "pcvi_beta_k" in info:
             betas.append(info["pcvi_beta_k"])
+        # ...and the value BEFORE beta_fallback. On a branch with
+        # beta_fallback set, pcvi_beta_k is never negative by construction, so
+        # measuring ISM violation off it would read 0% precisely where the
+        # violation is being masked.
+        if "pcvi_beta_k_raw" in info:
+            betas_raw.append(info["pcvi_beta_k_raw"])
         for key in ("pcvi_grad_corr", "adaptive_grad_corr"):
             if key in info:
                 corrs.append(info[key])
@@ -134,6 +155,8 @@ def run_one(optimizer_name, lambda_0, seed, args):
 
     has_beta = bool(betas)
     betas = torch.tensor(betas) if has_beta else torch.zeros(1)
+    has_raw = bool(betas_raw)
+    betas_raw = torch.tensor(betas_raw) if has_raw else torch.zeros(1)
     return {
         "diverged": float(diverged),
         "lambda_end": optimizer.lambda_k,
@@ -143,6 +166,11 @@ def run_one(optimizer_name, lambda_0, seed, args):
         "beta_median": betas.median().item() if has_beta else float("nan"),
         "beta_negative_pct": (
             100.0 * (betas < 0).float().mean().item() if has_beta else float("nan")
+        ),
+        # the honest one: before beta_fallback replaced the negative values
+        "beta_raw_negative_pct": (
+            100.0 * (betas_raw < 0).float().mean().item()
+            if has_raw else float("nan")
         ),
         "grad_corr": torch.tensor(corrs).mean().item() if corrs else float("nan"),
         "mean_return": experiment.mean_return,
@@ -190,10 +218,12 @@ def main():
         f"seeds {args.seeds}"
     )
     print(f"{'optimizer':>22} {'lambda_0':>10} {'lambda_end':>12} {'end/0':>8} "
-          f"{'beta med':>10} {'beta<0 %':>9} {'return':>9} {'status':>9}")
-    print("-" * 96)
+          f"{'beta med':>10} {'beta<0 %':>9} {'raw<0 %':>9} {'return':>9} "
+          f"{'status':>9}")
+    print("-" * 106)
 
     table = {}
+    rows = []
     for optimizer_name in args.optimizer:
         for lambda_0 in args.lambda0:
             results = [
@@ -201,6 +231,16 @@ def main():
             ]
             mean = {k: sum(r[k] for r in results) / len(results) for k in results[0]}
             table[(optimizer_name, lambda_0)] = mean
+            rows.append(
+                {
+                    "task": args.task,
+                    "optimizer": optimizer_name,
+                    "lambda_0": lambda_0,
+                    "n_seeds": len(args.seeds),
+                    "frames": args.iters * args.frames_per_batch,
+                    **{k: mean[k] for k in sorted(mean)},
+                }
+            )
             status = (
                 "ok" if mean["diverged"] == 0.0
                 else ("DIVERGED" if mean["diverged"] == 1.0 else "part.div")
@@ -208,10 +248,21 @@ def main():
             print(
                 f"{optimizer_name:>22} {lambda_0:>10.0e} {mean['lambda_end']:>12.3e} "
                 f"{mean['lambda_end'] / lambda_0:>8.3f} {mean['beta_median']:>10.4f} "
-                f"{mean['beta_negative_pct']:>8.1f}% {mean['mean_return']:>9.3f} "
+                f"{mean['beta_negative_pct']:>8.1f}% "
+                f"{mean['beta_raw_negative_pct']:>8.1f}% {mean['mean_return']:>9.3f} "
                 f"{status:>9}"
             )
         print()
+
+    results_csv = _output_dir(args) / "sweep_results.csv"
+    with results_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"table written to {results_csv}")
+    print("pick a value with:  python examples/pcvi/pick_lambda0.py "
+          f"--results {results_csv}")
+    print()
 
     print(
         "Read: `end/0` = 1.000 means lambda never moved, i.e. lambda_0 was already\n"
